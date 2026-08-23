@@ -16,11 +16,12 @@ from .models import Memory, MemoryQueryResult
 
 
 class MemoryStore:
-    def __init__(self, persist_path: str = "./memoos_data"):
+    def __init__(self, client_id: str = "default", persist_path: str = "./memoos_data"):
         self._client = chromadb.PersistentClient(path=persist_path)
         self._collection = self._client.get_or_create_collection(
-    "memories", metadata={"hnsw:space": "cosine"}
-)
+            f"memories_{client_id}", metadata={"hnsw:space": "cosine"}
+        )
+
     def add(self, memory: Memory) -> None:
         vector = embed_text(memory.text)
         self._collection.add(
@@ -52,13 +53,21 @@ class MemoryStore:
         )
 
     def search(self, query: str, top_k: int = 5) -> List[MemoryQueryResult]:
+        # Over-fetch before filtering: if we only asked Chroma for exactly
+        # top_k candidates, and the closest one happens to be superseded,
+        # filtering it out could leave fewer than top_k results even though
+        # valid matches exist further down. Fetch extra headroom, filter,
+        # then trim to what was actually requested.
+        fetch_count = max(top_k * 4, 10)
         query_vector = embed_text(query)
-        results = self._collection.query(query_embeddings=[query_vector], n_results=top_k)
+        results = self._collection.query(query_embeddings=[query_vector], n_results=fetch_count)
+
+        if not results["ids"] or not results["ids"][0]:
+            return []
 
         output = []
         for i in range(len(results["ids"][0])):
             meta = results["metadatas"][0][i]
-            # Skip memories that have been superseded by a newer one.
             if meta.get("superseded_by"):
                 continue
             memory = Memory(
@@ -69,12 +78,12 @@ class MemoryStore:
                 created_at=meta["created_at"],
                 importance=meta["importance"],
             )
-            # Chroma returns a distance; convert to a similarity-style score.
             distance = results["distances"][0][i]
             score = 1 - distance
             output.append(MemoryQueryResult(memory=memory, score=score))
+            if len(output) >= top_k:
+                break
         return output
 
     def mark_superseded(self, old_id: str, new_id: str) -> None:
-        """Mark an old memory as replaced by a newer, contradicting one."""
         self._collection.update(ids=[old_id], metadatas=[{"superseded_by": new_id}])

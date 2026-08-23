@@ -1,3 +1,16 @@
 venv/
 memoos_data/
 __pycache__/
+
+# Generated vector stores
+kb_data/
+
+# Model artifacts (too large for git; regenerate via merge_adapter.py / llama.cpp convert)
+finetuned_adapter/
+merged_model/
+*.gguf
+
+# Vendored upstream build
+llama.cpp/
+
+.DS_Store
