@@ -5,6 +5,9 @@ __pycache__/
 # Generated vector stores
 kb_data/
 
+# SQLite store
+*.db
+
 # Model artifacts (too large for git; regenerate via merge_adapter.py / llama.cpp convert)
 finetuned_adapter/
 merged_model/

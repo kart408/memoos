@@ -228,4 +228,8 @@ class Retriever:
         memory = self.db.get_memory(memory_id)
         if memory is None:
             return []
-        return self.search(memory.text, top_k=top_k, touch=False)
+        # Searching by a memory's own text ranks that memory first, every
+        # time. Over-fetch by one and drop it, so top_k means k *other*
+        # memories rather than k-1 plus the one you already had.
+        results = self.search(memory.text, top_k=top_k + 1, touch=False)
+        return [r for r in results if r.memory.id != memory_id][:top_k]

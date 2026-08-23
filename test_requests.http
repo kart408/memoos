@@ -1,0 +1,144 @@
+# MemoOS — manual API poking
+#
+# Start the server first:
+#     uvicorn app.main:app --reload
+#
+# Then either send these from an HTTP client (VS Code REST Client,
+# JetBrains, Zed), or copy the curl equivalents at the bottom.
+# Interactive docs are at http://127.0.0.1:8000/docs
+
+@host = http://127.0.0.1:8000
+@user = alice
+@other = bob
+
+### Health — also reports whether Ollama is reachable
+GET {{host}}/health
+
+### Add a memory (raw text, stored as-is)
+POST {{host}}/users/{{user}}/memories
+Content-Type: application/json
+
+{
+  "content": "Alice lives in Bengaluru and works as a backend engineer at Swiggy.",
+  "metadata": {"source": "onboarding"}
+}
+
+### Add another
+POST {{host}}/users/{{user}}/memories
+Content-Type: application/json
+
+{"content": "Alice has a golden retriever named Rex."}
+
+### Add one more
+POST {{host}}/users/{{user}}/memories
+Content-Type: application/json
+
+{"content": "Alice is allergic to peanuts."}
+
+### Add with fact extraction — one ramble in, clean standalone facts out
+POST {{host}}/users/{{user}}/memories
+Content-Type: application/json
+
+{
+  "content": "hey so I finally moved to Pune last week and joined Zomato as a data engineer",
+  "extract": true
+}
+
+### List all memories (newest first)
+GET {{host}}/users/{{user}}/memories
+
+### List, paginated
+GET {{host}}/users/{{user}}/memories?limit=2&offset=0
+
+### Semantic search — note it finds the dog without the word "pet" appearing
+GET {{host}}/users/{{user}}/memories/search?q=does she have any pets&top_k=3
+
+### Search with a relevance floor
+GET {{host}}/users/{{user}}/memories/search?q=what food should she avoid&top_k=5&min_score=0.4
+
+### Get one memory by id  (paste a real id from the list response)
+GET {{host}}/users/{{user}}/memories/PASTE_MEMORY_ID
+
+### Edit a memory — content changes trigger a re-embed
+PATCH {{host}}/users/{{user}}/memories/PASTE_MEMORY_ID
+Content-Type: application/json
+
+{"content": "Alice has a tabby cat named Mango."}
+
+### Edit only the metadata — no re-embed, content untouched
+PATCH {{host}}/users/{{user}}/memories/PASTE_MEMORY_ID
+Content-Type: application/json
+
+{"metadata": {"confirmed": true}}
+
+### Delete a memory
+DELETE {{host}}/users/{{user}}/memories/PASTE_MEMORY_ID
+
+### --- Isolation checks -------------------------------------------------
+### Give the other user their own memory; note no provisioning step exists
+POST {{host}}/users/{{other}}/memories
+Content-Type: application/json
+
+{"content": "Bob lives in Toronto and teaches high school chemistry."}
+
+### Bob's list contains only Bob's memories
+GET {{host}}/users/{{other}}/memories
+
+### Bob searching for Alice's facts finds nothing of hers
+GET {{host}}/users/{{other}}/memories/search?q=golden retriever Rex Swiggy&top_k=5
+
+### Bob fetching Alice's memory id gets 404, not her data
+GET {{host}}/users/{{other}}/memories/PASTE_ALICE_MEMORY_ID
+
+### Bob cannot edit it either
+PATCH {{host}}/users/{{other}}/memories/PASTE_ALICE_MEMORY_ID
+Content-Type: application/json
+
+{"content": "hijacked"}
+
+### Nor delete it
+DELETE {{host}}/users/{{other}}/memories/PASTE_ALICE_MEMORY_ID
+
+
+# ---------------------------------------------------------------------
+# curl equivalents
+# ---------------------------------------------------------------------
+#
+# Health:
+#   curl -s localhost:8000/health | jq
+#
+# Add:
+#   curl -s -X POST localhost:8000/users/alice/memories \
+#     -H 'Content-Type: application/json' \
+#     -d '{"content":"Alice has a golden retriever named Rex."}' | jq
+#
+# Add with extraction:
+#   curl -s -X POST localhost:8000/users/alice/memories \
+#     -H 'Content-Type: application/json' \
+#     -d '{"content":"I moved to Pune and joined Zomato","extract":true}' | jq
+#
+# List:
+#   curl -s 'localhost:8000/users/alice/memories?limit=10' | jq
+#
+# Search (remember to url-encode the query):
+#   curl -s -G localhost:8000/users/alice/memories/search \
+#     --data-urlencode 'q=does she have any pets' --data 'top_k=3' | jq
+#
+# Just the content and score:
+#   curl -s -G localhost:8000/users/alice/memories/search \
+#     --data-urlencode 'q=where does she work' \
+#     | jq -r '.hits[] | "\(.score|.*1000|round/1000)  \(.memory.content)"'
+#
+# Grab the first memory id into a shell variable:
+#   ID=$(curl -s localhost:8000/users/alice/memories | jq -r '.memories[0].id')
+#
+# Edit:
+#   curl -s -X PATCH localhost:8000/users/alice/memories/$ID \
+#     -H 'Content-Type: application/json' \
+#     -d '{"content":"Alice has a tabby cat named Mango."}' | jq
+#
+# Delete:
+#   curl -s -X DELETE localhost:8000/users/alice/memories/$ID | jq
+#
+# Isolation — expect 404:
+#   curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/users/bob/memories/$ID
