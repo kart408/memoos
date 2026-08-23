@@ -9,8 +9,9 @@ any relevant remembered facts folded in as context.
 """
 
 import re
+from . import config
 from .memory import MemoOS
-from .extraction import extract_fact
+from .models import MemoryQueryResult
 from .llm import generate_reply
 
 GENERAL_PROMPT = """You are a helpful AI assistant with memory of past conversations with this user. Use anything in "What you remember about this user" naturally in your answer if it's relevant. If nothing is relevant, just answer normally.
@@ -45,6 +46,32 @@ def _is_personal_question(message: str) -> bool:
     return any(marker in lowered for marker in PERSONAL_QUESTION_MARKERS)
 
 
+def _is_confident(result: MemoryQueryResult) -> bool:
+    """
+    Is this hit good enough to answer with, rather than admit ignorance?
+
+    Judged on raw cosine similarity, never on the fused score — the fused
+    score encodes rank rather than similarity, so it means nothing next to
+    a constant. See config.RECALL_MIN_SIMILARITY_* for the calibration.
+
+    A memory found by two independent retrievers clears a lower bar than
+    one found by vector search alone, because vector search always returns
+    its nearest neighbour however far away it is, while keyword search
+    abstains when nothing significant overlaps.
+    """
+    if result.vector_score is None:
+        # Keyword-only: there is no similarity to weigh, but matching a
+        # significant token exactly is already a strong signal — the
+        # stopword filter means "the" and "user" can't have caused it.
+        return "keyword" in result.matched_by
+
+    corroborated = ("vector" in result.matched_by
+                    and "keyword" in result.matched_by)
+    floor = (config.RECALL_MIN_SIMILARITY_CORROBORATED if corroborated
+             else config.RECALL_MIN_SIMILARITY_VECTOR_ONLY)
+    return result.vector_score >= floor
+
+
 def build_general_prompt(user_message: str, memory_context: str) -> str:
     parts = [GENERAL_PROMPT]
     if memory_context:
@@ -67,9 +94,14 @@ class MemoryAssistant:
     def chat(self, user_message: str) -> str:
         # 1. Personal statement -> remember it, acknowledge only
         if _is_personal_statement(user_message):
-            fact = extract_fact(user_message)
-            if fact:
-                self.memo.add(fact)
+            # The full pipeline, not the single-fact shortcut. One
+            # sentence routinely carries several facts — "I live in
+            # Hyderabad and I work at Zoho" is two — and keeping only the
+            # first silently loses the rest, so the assistant later denies
+            # knowing something the user plainly said. This also builds
+            # the entity graph and lets a new statement supersede one it
+            # contradicts.
+            self.memo.remember(user_message)
             prompt = build_acknowledge_prompt(user_message)
             return generate_reply(prompt, temperature=0.3)
 
@@ -77,7 +109,7 @@ class MemoryAssistant:
         #    from stored memory, no model guesswork
         if _is_personal_question(user_message):
             results = self.memo.search(user_message, top_k=1)
-            if results and results[0].score >= 0.2:
+            if results and _is_confident(results[0]):
                 return f"You mentioned: {results[0].memory.text}"
             return "I don't think you've told me that yet - feel free to share, and I'll remember it."
 

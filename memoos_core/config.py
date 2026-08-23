@@ -126,6 +126,45 @@ MIN_RESULT_SCORE = _env_float("MEMOOS_MIN_RESULT_SCORE", 0.0)
 MIN_VECTOR_SIMILARITY = _env_float("MEMOOS_MIN_VECTOR_SIMILARITY", 0.25)
 
 
+# ---------------------------------------------------------------- recall
+
+# When the assistant answers a personal question straight from memory
+# instead of admitting it doesn't know.
+#
+# These are compared against raw cosine similarity, NOT against the fused
+# score `search()` returns. That distinction is the whole point: RRF
+# scores encode *rank*, not similarity, and top out near 1/(RRF_K + 1) —
+# about 0.016 here. Comparing one to a constant like 0.2 is a category
+# error, and one that fails silently: the gate simply never opens and the
+# assistant denies knowing things it was just told.
+#
+# Two tiers, calibrated against measured pairs rather than guessed,
+# because a single cutoff cannot separate these cases — the best wrong
+# answer scores within 0.01 of the worst right one:
+#
+#   corroborated — vector and keyword both matched
+#       "where do I live?"  -> "User lives in Hyderabad."        0.438
+#       "what do I prefer?" -> "User prefers PyTorch..."         0.578
+#     No wrong answer in testing ever earned keyword agreement: an
+#     unrelated question shares no significant token with a memory, so
+#     the second retriever abstains rather than concurring.
+#
+#   vector only — no lexical overlap to corroborate with
+#       "what did I say about running?" -> marathon memory       0.509  right
+#       "who am I related to?"          -> sister memory         0.591  right
+#       "what is 2 plus 2?"             -> sister memory         0.462  wrong
+#       "who won the world cup?"        -> sister memory         0.430  wrong
+#     Right answers bottom out at 0.509, wrong ones top out at 0.462, so
+#     the bar sits between them.
+#
+# Agreement from a second, independent retriever is evidence, so it buys
+# a lower similarity requirement.
+RECALL_MIN_SIMILARITY_CORROBORATED = _env_float(
+    "MEMOOS_RECALL_MIN_SIMILARITY_CORROBORATED", 0.40)
+RECALL_MIN_SIMILARITY_VECTOR_ONLY = _env_float(
+    "MEMOOS_RECALL_MIN_SIMILARITY_VECTOR_ONLY", 0.48)
+
+
 # --------------------------------------------------------- consolidation
 
 # Cosine similarity above which two memories are treated as the same fact

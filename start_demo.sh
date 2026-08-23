@@ -35,7 +35,7 @@ fi
 
 echo ""
 echo "Everything is running. Opening the demo page..."
-open test_college_site.html
+open memoostest.html
 
 echo ""
 echo "To stop everything later, run: kill $API_PID && pkill ollama"
