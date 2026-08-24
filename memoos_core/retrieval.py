@@ -186,10 +186,14 @@ class Retriever:
 
             memory_strength = strength(memory, now)
 
-            # Strength modulates rather than multiplies outright: even a
-            # fully decayed memory keeps half its fused score, so decay
-            # reorders results but never hides a direct, obvious match.
-            final = fusion_score * (0.5 + 0.5 * memory_strength)
+            # Strength nudges rather than decides. Fusion has already
+            # judged relevance; decay and reinforcement only break ties
+            # between results fusion rates as comparable. Weight it much
+            # higher and it stops being a tiebreaker — RRF's adjacent
+            # ranks sit ~1.6% apart, so a wide multiplier simply outvotes
+            # the relevance signal it was meant to refine.
+            weight = config.STRENGTH_WEIGHT
+            final = fusion_score * ((1.0 - weight) + weight * memory_strength)
 
             matched_by = []
             if vector_score is not None:
@@ -219,7 +223,11 @@ class Retriever:
         results = results[:top_k]
 
         if touch and results:
-            self.db.touch([r.memory.id for r in results])
+            # Only the best hits earn reinforcement. Crediting every
+            # returned candidate would reward memories for merely being
+            # the least-bad thing available, and that credit compounds
+            # into future rankings — see config.REINFORCE_TOP_N.
+            self.db.touch([r.memory.id for r in results[:config.REINFORCE_TOP_N]])
 
         return results
 

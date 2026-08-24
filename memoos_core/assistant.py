@@ -9,6 +9,8 @@ any relevant remembered facts folded in as context.
 """
 
 import re
+from typing import Optional
+
 from . import config
 from .memory import MemoOS
 from .models import MemoryQueryResult
@@ -87,7 +89,12 @@ def build_acknowledge_prompt(user_message: str) -> str:
 class MemoryAssistant:
     """A single user's AI assistant, backed by their own persistent memory."""
 
-    def __init__(self, user_id: str, persist_path: str = "./memoos_data"):
+    def __init__(self, user_id: str, persist_path: Optional[str] = None):
+        # Defaulting to None rather than a literal path lets MemoOS apply
+        # config.DATA_DIR, so MEMOOS_DATA_DIR works here too. Hardcoding
+        # "./memoos_data" made the env var silently ineffective for
+        # anything built on the assistant — including the API server,
+        # which wrote to the working directory whatever you configured.
         self.user_id = user_id
         self.memo = MemoOS(client_id=user_id, persist_path=persist_path)
 

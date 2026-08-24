@@ -218,6 +218,32 @@ FORGET_THRESHOLD = _env_float("MEMOOS_FORGET_THRESHOLD", 0.05)
 REINFORCEMENT_WEIGHT = _env_float("MEMOOS_REINFORCEMENT_WEIGHT", 0.30)
 REINFORCEMENT_CAP = _env_float("MEMOOS_REINFORCEMENT_CAP", 2.0)
 
+# How many of a search's results earn that reinforcement.
+#
+# Reinforcement is supposed to record "this memory was useful". But a
+# search returns its k nearest candidates whether or not any of them
+# answered the question — vector search always returns *something*, however
+# far away. Crediting the whole result list conflates "appeared in a list"
+# with "was the answer".
+#
+# That distinction matters because strength feeds back into ranking: a
+# memory surfaced once as filler ranks higher next time, which makes it
+# more likely to be surfaced again. Rich-get-richer, on noise. It is how a
+# memory about building a research assistant climbed above the correct
+# answer to "where does the user live?" — it had been returned three times
+# as an also-ran and out-reinforced the real answer.
+REINFORCE_TOP_N = _env_int("MEMOOS_REINFORCE_TOP_N", 1)
+
+# How far memory strength may reorder results.
+#
+# Strength modulates the fused score rather than replacing it, and the
+# weight has to stay small. RRF separates adjacent ranks by only about
+# 1.6% (1/61 vs 1/62), so a multiplier with a wide range does not break
+# ties — it overrides relevance outright. At the original 0.5 the swing
+# was 2x, enough to lift a memory past a dozen better matches purely for
+# having been touched more often.
+STRENGTH_WEIGHT = _env_float("MEMOOS_STRENGTH_WEIGHT", 0.15)
+
 
 # ------------------------------------------------------------- chunking
 
