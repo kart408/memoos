@@ -236,13 +236,25 @@ REINFORCE_TOP_N = _env_int("MEMOOS_REINFORCE_TOP_N", 1)
 
 # How far memory strength may reorder results.
 #
-# Strength modulates the fused score rather than replacing it, and the
-# weight has to stay small. RRF separates adjacent ranks by only about
-# 1.6% (1/61 vs 1/62), so a multiplier with a wide range does not break
-# ties — it overrides relevance outright. At the original 0.5 the swing
-# was 2x, enough to lift a memory past a dozen better matches purely for
-# having been touched more often.
-STRENGTH_WEIGHT = _env_float("MEMOOS_STRENGTH_WEIGHT", 0.15)
+# This has a correct upper bound, and it is smaller than intuition
+# suggests. RRF scores adjacent ranks 1/(K+r) and 1/(K+r+1), a relative
+# gap of about 1/(K+r) — roughly 1.6% at the top of the list with K=60.
+# The strength multiplier spans `weight` (strength runs 0..1), so any
+# weight above that gap lets strength flip genuinely better matches
+# rather than merely separate equal ones.
+#
+# That bound was learned twice. At 0.5 the swing was 2x, and a memory
+# about building a research assistant beat "User moved to Mumbai" for
+# "Where does the user live?" despite scoring 0.564 against 0.600. At
+# 0.15 the same inversion came back as soon as the demo was run a second
+# time: restating a fact reinforces it as a duplicate, which was worth a
+# 4.1% strength edge — still comfortably above 1.6%.
+#
+# At 0.01 the multiplier spans 1%, below one rank step, so strength can
+# separate results that fusion rates equally and cannot outvote results
+# it rates differently. Decay's real job — deciding what to forget — runs
+# through forget_weak() and is unaffected by this number.
+STRENGTH_WEIGHT = _env_float("MEMOOS_STRENGTH_WEIGHT", 0.01)
 
 
 # ------------------------------------------------------------- chunking

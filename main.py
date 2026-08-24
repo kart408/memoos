@@ -35,6 +35,18 @@ def show(memo: MemoOS, query: str) -> None:
 def main():
     memo = MemoOS(persist_path="./memoos_data", container="demo")
 
+    # Start from a known state. This demo tells a story — the user lives
+    # in one city, then moves — and a story does not compose with its own
+    # replay. Run it twice against a surviving store and the second
+    # "I live in Bengaluru" supersedes the Mumbai memory the first run
+    # created, so the arc runs backwards and the queries below stop
+    # meaning anything. Only this container is touched.
+    existing = memo.all(limit=500, status=None)
+    if existing:
+        print(f"Clearing {len(existing)} memories from the previous run.\n")
+        for memory in existing:
+            memo.delete(memory.id)
+
     print("Remembering what the user said...")
     for statement in [
         "I live in Bengaluru and I'm studying AI/ML engineering.",
