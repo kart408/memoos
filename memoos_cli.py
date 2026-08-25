@@ -257,6 +257,97 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """
+    Check every part of the chain, in the order it actually runs.
+
+    The layer has two speeds and they fail differently. Journalling is
+    stdlib and SQLite, so it works or the disk is broken. Distillation
+    needs Ollama and a model, and it runs *in the background when your
+    terminal closes* — which is the worst possible place for a failure,
+    because nobody is watching. A session whose distill fails is not
+    lost (its events stay pending and the next run picks them up), but
+    you would never know to look. This is where you find out.
+    """
+    import urllib.error
+    import urllib.request
+
+    from memoos_core import config, connection
+
+    ok = True
+
+    def line(good: bool, label: str, detail: str = "", fatal: bool = True) -> None:
+        nonlocal ok
+        if good:
+            mark = green("✓")
+        else:
+            mark = yellow("!") if not fatal else "\033[31m✗\033[0m"
+            if fatal:
+                ok = False
+        print(f"  {mark} {label:<26} {dim(detail)}")
+
+    print(f"\n{bold('attach')}")
+    state = connection.status()
+    line(state["hook_installed"], "shell hook installed",
+         os.path.join(os.path.expanduser("~/.memoos"), "memoos.zsh"))
+
+    zshrc = os.path.expanduser("~/.zshrc")
+    sourced = False
+    if os.path.exists(zshrc):
+        with open(zshrc, encoding="utf-8", errors="replace") as handle:
+            sourced = "memoos.zsh" in handle.read()
+    line(sourced, "sourced from ~/.zshrc",
+         "" if sourced else "add: source ~/.memoos/memoos.zsh")
+
+    # Set by the hook itself, so its presence proves this shell attached.
+    attached = bool(os.environ.get("MEMOOS_SESSION"))
+    line(attached, "attached to this shell",
+         os.environ.get("MEMOOS_SESSION", "open a new terminal"), fatal=False)
+    line(state["connected"], "recording",
+         "disconnected" if not state["connected"] else "")
+
+    print(f"\n{bold('store')}")
+    data_dir = os.path.abspath(config.DATA_DIR)
+    pinned = bool(os.environ.get("MEMOOS_DATA_DIR"))
+    line(pinned, "MEMOOS_DATA_DIR pinned",
+         data_dir if pinned else "unpinned — every directory grows its own store")
+    writable = os.access(data_dir, os.W_OK) if os.path.isdir(data_dir) \
+        else os.access(os.path.dirname(data_dir) or ".", os.W_OK)
+    line(writable, "writable", data_dir)
+
+    container = args.container or container_for()
+    path = config.db_path(container=container)
+    line(True, "container", f"{container} → {path}")
+
+    print(f"\n{bold('distillation')}   {dim('runs in the background when a terminal closes')}")
+    models = []
+    try:
+        with urllib.request.urlopen(f"{config.OLLAMA_URL}/api/tags", timeout=3) as response:
+            models = [m["name"] for m in json.load(response).get("models", [])]
+        line(True, "ollama reachable", config.OLLAMA_URL)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        line(False, "ollama reachable", f"{config.OLLAMA_URL} — {error}")
+
+    if models:
+        wanted = config.EXTRACT_MODEL
+        present = wanted in models or f"{wanted}:latest" in models \
+            or any(m.split(":")[0] == wanted.split(":")[0] for m in models)
+        line(present, "extraction model",
+             wanted if present else f"{wanted} missing — ollama pull {wanted}")
+
+    pending = len(Journal().events(container, undistilled_only=True, limit=10_000))
+    line(True, "events awaiting distill", str(pending) if pending else "none")
+
+    counts = quick.counts(container)
+    print(f"\n  {counts['memories']} memories · {counts['entities']} entities · "
+          f"{counts['relations']} relations\n")
+
+    if not ok:
+        print(dim("  something above is broken — journalling still works, "
+                  "but closing a terminal will not fold it into memory\n"))
+    return 0 if ok else 1
+
+
 def cmd_files(args) -> int:
     """
     Where each user's data actually is, and how big it is.
@@ -425,6 +516,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = subs.add_parser("install", help="wire memoos into your shell")
     p.add_argument("--print-only", action="store_true", help="print the hook, install nothing")
     p.set_defaults(func=cmd_install)
+
+    p = subs.add_parser("doctor", help="check every part of the chain")
+    p.add_argument("--container")
+    p.set_defaults(func=cmd_doctor)
 
     p = subs.add_parser("files", help="where each user's data is stored")
     p.set_defaults(func=cmd_files)
