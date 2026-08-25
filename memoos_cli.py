@@ -8,6 +8,7 @@ journalled instantly, folded into structured memories later, and handed
 back when you open a new terminal in the same project.
 
     memoos install        wire it into your shell
+    memoos start          ollama + the dashboard, from anywhere
     memoos recall         what was I doing here?
     memoos distill        fold this session into memory
     memoos ingest FILE    teach it about you or the project
@@ -65,6 +66,7 @@ dim = lambda s: paint(s, "2")
 bold = lambda s: paint(s, "1")
 cyan = lambda s: paint(s, "36")
 green = lambda s: paint(s, "32")
+red = lambda s: paint(s, "31")
 yellow = lambda s: paint(s, "33")
 magenta = lambda s: paint(s, "35")
 
@@ -504,6 +506,68 @@ def cmd_install(args) -> int:
     return 0
 
 
+def cmd_start(args) -> int:
+    """
+    Everything needed to see MemoOS running, from any directory.
+
+    `start_demo.sh` does this too, but a script can only be run by its
+    path — and a new Terminal window opens in your home directory, where
+    `./start_demo.sh` means a file that is not there. `memoos` is on your
+    PATH everywhere the shell hook is loaded, so this is the form that
+    works from wherever you happen to be.
+
+    The difference from `serve` is Ollama: this starts it if it is not
+    already up, and refuses if the extraction model is missing, because
+    without it a closing terminal has nothing to fold its session with.
+    """
+    import shutil as _shutil
+    import subprocess
+    import time
+
+    if not _ollama_reachable():
+        if not _shutil.which("ollama"):
+            print("\n  " + red("ollama is not installed") +
+                  dim(" — see https://ollama.com/download\n"))
+            return 1
+        print(dim("  starting ollama..."))
+        with open("/tmp/ollama.log", "ab") as log:
+            # Detached: it must outlive this command, which exits as soon
+            # as you stop the server.
+            subprocess.Popen(["ollama", "serve"], stdout=log, stderr=log,
+                             start_new_session=True)
+        for _ in range(20):
+            if _ollama_reachable():
+                break
+            time.sleep(0.5)
+        else:
+            print("\n  " + red("ollama did not come up") +
+                  dim(" — check /tmp/ollama.log\n"))
+            return 1
+
+    from memoos_core import config
+    if not _has_model(config.EXTRACT_MODEL):
+        print("\n  " + red(f"extraction model {config.EXTRACT_MODEL} is missing"))
+        print(dim(f"  run: ollama pull {config.EXTRACT_MODEL}\n"))
+        return 1
+
+    print(f"  {green('ollama')} {dim(config.OLLAMA_URL)}   "
+          f"{green('model')} {dim(config.EXTRACT_MODEL)}")
+    return cmd_serve(args)
+
+
+def _has_model(wanted: str) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{_ollama_url()}/api/tags", timeout=3) as response:
+            names = [m["name"] for m in json.load(response).get("models", [])]
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    # `mistral` should match `mistral:latest`, and the other way round.
+    stem = wanted.split(":")[0]
+    return any(name == wanted or name.split(":")[0] == stem for name in names)
+
+
 def cmd_serve(args) -> int:
     """
     Run the dashboard, from wherever you happen to be standing.
@@ -621,6 +685,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subs.add_parser("files", help="where each user's data is stored")
     p.set_defaults(func=cmd_files)
+
+    p = subs.add_parser("start", help="start ollama and the dashboard")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.set_defaults(func=cmd_start)
 
     p = subs.add_parser("serve", help="run the dashboard")
     p.add_argument("--host", default="127.0.0.1")
