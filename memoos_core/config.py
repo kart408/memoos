@@ -73,6 +73,13 @@ EMBED_QUERY_PREFIX = _env_str("MEMOOS_EMBED_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX
 # `embedding.self_check()` verifies whichever device you pick.
 EMBED_DEVICE = _env_str("MEMOOS_EMBED_DEVICE", "cpu")
 
+# A terminal you never close never reaches `zshexit`, so its work is
+# journalled and folded into nothing. Once this many events are waiting,
+# the background logger starts a distil of its own — which means a
+# week-long session accumulates memory as it goes rather than all at
+# once, or never. Set to 0 to fold only at session end.
+AUTODISTILL_AFTER = _env_int("MEMOOS_AUTODISTILL_AFTER", 40)
+
 LLM_TIMEOUT = _env_int("MEMOOS_LLM_TIMEOUT", 180)
 LLM_JSON_RETRIES = _env_int("MEMOOS_LLM_JSON_RETRIES", 2)
 

@@ -38,11 +38,30 @@ if len(sys.argv) >= 3 and sys.argv[1] == "log":
     _exit_code = int(sys.argv[2]) if sys.argv[2].lstrip("-").isdigit() else None
     _command = " ".join(sys.argv[3:])
     _cwd = os.environ.get("MEMOOS_CWD") or os.getcwd()
-    Journal().record(
-        "command", _command, container=container_for(_cwd),
+    _container = container_for(_cwd)
+    _journal = Journal()
+    _journal.record(
+        "command", _command, container=_container,
         session_id=os.environ.get("MEMOOS_SESSION", "shell"),
         cwd=_cwd, exit_code=_exit_code,
     )
+
+    # A terminal you never close never reaches `zshexit`, so everything it
+    # journals waits forever. Once enough has piled up, fold some of it in
+    # now. This runs in the process the hook already backgrounded and
+    # disowned, so the prompt pays nothing for it — one COUNT(*) on an
+    # indexed column, and only then a spawn.
+    from memoos_core import config as _config
+    if _config.AUTODISTILL_AFTER > 0:
+        try:
+            if _journal.pending_count(_container) >= _config.AUTODISTILL_AFTER:
+                from memoos_core.autodistill import spawn_if_idle
+                spawn_if_idle(_container)
+        except Exception:
+            # Journalling has already succeeded, and it is the part that
+            # must not fail. A problem starting the distil costs a delay,
+            # never an event.
+            pass
     sys.exit(0)
 
 import argparse  # noqa: E402
@@ -205,6 +224,23 @@ def cmd_clear(args) -> int:
 
 
 def cmd_distill(args) -> int:
+    from memoos_core import autodistill
+    from memoos_core.terminal import TerminalMemory
+
+    # Only set when the background logger started this one. Owning the
+    # lock for the whole run is what stops a busy session from spawning a
+    # second distil on top of this one.
+    lock = getattr(args, "lock", None)
+    autodistill.claim(lock)
+    if lock:
+        autodistill.install_signal_cleanup()
+    try:
+        return _distill(args)
+    finally:
+        autodistill.release(lock)
+
+
+def _distill(args) -> int:
     from memoos_core.terminal import TerminalMemory
     memory = TerminalMemory(container=args.container)
     print(dim(f"distilling {memory.container}… (this runs the extraction model)"))
@@ -643,6 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subs.add_parser("distill", help="fold journalled events into memory")
     p.add_argument("--session", help="only this session id")
+    p.add_argument("--lock", help=argparse.SUPPRESS)   # set by the auto-distil
     p.set_defaults(func=cmd_distill)
 
     p = subs.add_parser("ingest", help="add knowledge-base documents")

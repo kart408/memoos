@@ -273,6 +273,66 @@ def test_cascade_and_single_file() -> None:
     index.close()
 
 
+# ------------------------------------------------------------ autodistil
+
+def test_autodistil_lock() -> None:
+    section("auto-distil")
+
+    from memoos_core import autodistill
+
+    # Keep the real ~/.memoos/locks out of it.
+    autodistill.LOCK_DIR = os.path.join(SCRATCH, "locks")
+
+    ok("nothing held to begin with", autodistill._held_by("demo") is None)
+
+    path = autodistill._lock_path("demo")
+    autodistill.claim(path)
+    check("claiming records this process", autodistill._held_by("demo"), os.getpid())
+
+    # Distillation takes tens of seconds and commands arrive far faster.
+    # Without this, a busy session would spawn a distil per command.
+    check("a second distil is refused while one runs",
+          autodistill.spawn_if_idle("demo"), False)
+
+    autodistill.release(path)
+    ok("releasing frees it", autodistill._held_by("demo") is None)
+
+    # A distil killed mid-run leaves its lock behind. That must read as
+    # free, or the container would never distil again.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("999999")
+    ok("a lock from a dead process is not honoured",
+       autodistill._held_by("demo") is None)
+    ok("and is cleaned up", not os.path.exists(path))
+
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("not-a-pid")
+    ok("a corrupt lock is not honoured either",
+       autodistill._held_by("demo") is None)
+
+    ok("locks are per container",
+       autodistill._lock_path("one") != autodistill._lock_path("two"))
+
+
+def test_pending_count() -> None:
+    section("pending")
+
+    journal = Journal()
+    check("an unknown container has nothing pending",
+          journal.pending_count("nobody"), 0)
+
+    journal.record("command", "make", container="counted",
+                   session_id="s", exit_code=0)
+    journal.record("command", "make test", container="counted",
+                   session_id="s", exit_code=0)
+    check("both events are pending", journal.pending_count("counted"), 2)
+
+    events = journal.events("counted", undistilled_only=True)
+    journal.mark_distilled([events[0]["id"]], "counted")
+    check("distilling one leaves one", journal.pending_count("counted"), 1)
+
+
 def main() -> int:
     print(f"scratch store: {SCRATCH}")
     test_paths()
@@ -282,6 +342,8 @@ def main() -> int:
     test_cache_invalidation()
     test_model_change_is_survivable()
     test_cascade_and_single_file()
+    test_pending_count()
+    test_autodistil_lock()
 
     print(f"\n  {PASSED} passed, {FAILED} failed\n")
     return 1 if FAILED else 0
