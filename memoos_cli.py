@@ -12,6 +12,7 @@ back when you open a new terminal in the same project.
     memoos distill        fold this session into memory
     memoos ingest FILE    teach it about you or the project
     memoos graph          what it knows, and how it connects
+    memoos clear          forget a project, or every project
     memoos serve          the dashboard
 
 Every command is scoped to a *container*, which is the git repo you are
@@ -142,11 +143,60 @@ def cmd_recall(args) -> int:
     return 0
 
 
-def cmd_note(args) -> int:
-    text = " ".join(args.text)
-    Journal().record("note", text, container=args.container or container_for(),
-                     session_id=os.environ.get("MEMOOS_SESSION", "notes"))
-    print(green("noted."))
+def cmd_clear(args) -> int:
+    """
+    Forget a project entirely, or every project.
+
+    One container is one file, so this is a delete rather than a sweep
+    across tables — which is the honest thing to do. A DELETE would
+    leave the journal, the entities and the vectors to be cleaned up
+    separately, and missing one of them is how a "cleared" project comes
+    back still knowing things.
+
+    Destructive and unrecoverable, so it names what it is about to
+    remove and waits for you to agree.
+    """
+    from memoos_core import config
+
+    if args.all:
+        targets = config.stored_containers()
+    else:
+        container = args.container or container_for()
+        targets = [container] if os.path.exists(
+            config.db_path(container=container)) else []
+
+    if not targets:
+        print(dim("\n  nothing stored to clear\n"))
+        return 0
+
+    print(f"\n{bold('about to delete')}")
+    total = 0
+    for name in targets:
+        path = config.db_path(container=name)
+        size = sum(os.path.getsize(path + suffix)
+                   for suffix in ("", "-wal", "-shm")
+                   if os.path.exists(path + suffix))
+        total += size
+        counts = quick.counts(name)
+        tally = f"{counts['memories']} memories · {counts['entities']} entities"
+        print(f"  {cyan(name):<28} {_human(size):>9}   {dim(tally)}")
+    print(f"\n  {len(targets)} file(s), {_human(total)} — {yellow('this cannot be undone')}")
+
+    if not args.yes:
+        try:
+            answer = input("  type 'yes' to confirm: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer != "yes":
+            print(dim("  cancelled\n"))
+            return 1
+
+    for name in targets:
+        path = config.db_path(container=name)
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(path + suffix):
+                os.remove(path + suffix)
+    print(f"  {green('cleared')} {len(targets)} project(s)\n")
     return 0
 
 
@@ -378,8 +428,8 @@ def cmd_files(args) -> int:
                    if os.path.exists(path + suffix))
         total += size
         counts = quick.counts(name)
-        print(f"  {cyan(name):<28} {_human(size):>9}   "
-              f"{dim(f'{counts["memories"]} memories · {counts["entities"]} entities')}")
+        tally = f"{counts['memories']} memories · {counts['entities']} entities"
+        print(f"  {cyan(name):<28} {_human(size):>9}   {dim(tally)}")
 
     print(f"\n  {len(names)} file(s), {_human(total)} total\n")
     return 0
@@ -475,9 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=8)
     p.set_defaults(func=cmd_recall)
 
-    p = subs.add_parser("note", help="journal something yourself")
-    p.add_argument("text", nargs="+")
-    p.set_defaults(func=cmd_note)
+    p = subs.add_parser("clear", help="forget a project, or every project")
+    p.add_argument("--container")
+    p.add_argument("--all", action="store_true", help="every project, not just this one")
+    p.add_argument("--yes", action="store_true", help="skip the confirmation")
+    p.set_defaults(func=cmd_clear)
 
     p = subs.add_parser("distill", help="fold journalled events into memory")
     p.add_argument("--session", help="only this session id")
