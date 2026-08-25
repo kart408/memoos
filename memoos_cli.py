@@ -45,6 +45,8 @@ if len(sys.argv) >= 3 and sys.argv[1] == "log":
     sys.exit(0)
 
 import argparse  # noqa: E402
+import threading  # noqa: E402
+import webbrowser  # noqa: E402
 import json  # noqa: E402
 
 from memoos_core import quick  # noqa: E402
@@ -503,10 +505,54 @@ def cmd_install(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    """
+    Run the dashboard, from wherever you happen to be standing.
+
+    The shell hook puts `memoos` on your PATH globally, so every command
+    has to work from any directory — but uvicorn resolves "api:app" as an
+    *import*, which only succeeds from the project root. Without the path
+    insert below, `memoos serve` worked in ~/memoos and nowhere else,
+    which is the opposite of what a globally-available command should do.
+    """
     import uvicorn
-    print(dim(f"dashboard → http://{args.host}:{args.port}/"))
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    # Not fatal. The dashboard reads memories, entities and the graph
+    # straight out of SQLite, all of which work with Ollama down; only
+    # distilling and semantic search need it. Better to say so and serve
+    # than to refuse over a dependency half the page does not use.
+    if not _ollama_reachable():
+        print(yellow("  ollama unreachable") +
+              dim(f" at {_ollama_url()} — the dashboard will read fine, "
+                  "but distilling needs it"))
+
+    url = f"http://{args.host}:{args.port}/"
+    print(dim(f"dashboard → {url}"))
+    if not args.no_open:
+        # Deferred until the server is actually up, otherwise the browser
+        # races uvicorn's bind and lands on a connection error.
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+
     uvicorn.run("api:app", host=args.host, port=args.port, reload=False)
     return 0
+
+
+def _ollama_url() -> str:
+    from memoos_core import config
+    return config.OLLAMA_URL
+
+
+def _ollama_reachable() -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{_ollama_url()}/api/tags", timeout=2):
+            return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
 
 
 # ------------------------------------------------------------------ parse
@@ -579,6 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = subs.add_parser("serve", help="run the dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--no-open", action="store_true", help="do not open a browser")
     p.set_defaults(func=cmd_serve)
 
     return parser
