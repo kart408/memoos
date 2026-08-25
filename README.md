@@ -283,5 +283,29 @@ cloud model calls of any kind. A local model is used, but only as a *parser* —
 it turns text into structured facts. Nothing here generates a reply, and
 nothing talks back.
 
-There are no automated tests. What exists is `memoos doctor`, which checks the
-running system rather than the code.
+---
+
+## Testing
+
+```bash
+python test_memoos.py
+```
+
+43 assertions against a scratch data directory — it never touches your real
+store. No Ollama and no extraction model are needed: everything it covers is
+storage, routing, isolation and search, none of which involve the LLM.
+
+```
+  43 passed, 0 failed
+```
+
+It checks that a container name resolves to exactly one file and cannot escape
+the containers directory, that events land in their own tenant's file and
+nowhere else, that *asking* what an unknown project remembers does not create
+it, that search ranks by meaning rather than keyword overlap, that a write from
+one process is visible to another with a warm cache, that a vector from a
+different embedding model is reported and skipped rather than crashing search,
+and that deleting a memory takes its vector with it.
+
+`memoos doctor` is the complement: it checks the running system — hook, store,
+Ollama, model — rather than the code.
