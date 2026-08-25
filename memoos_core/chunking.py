@@ -105,8 +105,3 @@ def _carry_over(sentences: List[str], overlap_words: int) -> tuple[List[str], in
         total += words
     return carried, total
 
-
-# Kept under its original name so the knowledge base and any existing
-# callers keep working unchanged.
-def chunk_document(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
-    return chunk_text(text, chunk_size=chunk_size, overlap=overlap)

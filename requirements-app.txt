@@ -1,8 +1,8 @@
 # Dependencies for app/ — the memory layer.
 #
 # Deliberately separate from requirements.txt, which belongs to the
-# older memoos_core engine and pulls in chromadb and sentence-transformers
-# (and therefore torch, ~2GB). None of that is needed to run app/:
+# older memoos_core engine and pulls in sentence-transformers (and
+# therefore torch, ~2GB). None of that is needed to run app/:
 # embeddings come from Ollama over HTTP, and ranking is plain numpy.
 
 fastapi>=0.115
