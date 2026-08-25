@@ -106,9 +106,12 @@ _memoos_precmd() {{
   last=$(fc -ln -1 2>/dev/null)
   last="${{last#"${{last%%[![:space:]]*}}"}}"      # strip leading blanks
 
-  # Don't journal the tool journalling you.
+  # Don't journal the tool journalling you, and don't journal leaving.
+  # `exit` is the last thing in every session and says nothing about the
+  # work — it would put one content-free line in front of the digest of
+  # every terminal you ever close.
   case "$last" in
-    memoos*|*MEMOOS_CLI*|"") return $code ;;
+    memoos*|*MEMOOS_CLI*|exit|logout|"") return $code ;;
   esac
 
   MEMOOS_CWD="$PWD" _memoos_bg log "$code" "$last"
