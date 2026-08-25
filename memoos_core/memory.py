@@ -38,6 +38,35 @@ from .retrieval import Retriever
 from .vectors import VectorIndex
 
 
+
+
+def format_as_context(results: List[MemoryQueryResult],
+                      include_types: bool = False) -> str:
+    """
+    Render retrieved memories as prompt-ready lines.
+
+    Split out from `recall_as_context` so a caller holding results from a
+    search it already ran can format them without running that search a
+    second time — which would not just cost another embedding round trip
+    but also reinforce the same memories twice for a single message.
+    """
+    if not results:
+        return ""
+
+    seen: set[str] = set()
+    lines: List[str] = []
+    for result in results:
+        text = result.memory.text.strip()
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        label = f" [{result.memory.memory_type.value}]" if include_types else ""
+        lines.append(f"-{label} {text}")
+
+    return "\n".join(lines)
+
+
 class MemoOS:
     def __init__(self, client_id: str = "default",
                  persist_path: Optional[str] = None,
@@ -48,8 +77,11 @@ class MemoOS:
         self.container = container or client_id
         self.persist_path = persist_path or config.DATA_DIR
 
-        self.db = Database(config.db_path(self.persist_path))
-        self.vectors = VectorIndex(self.container, config.vector_path(self.persist_path))
+        # One file, this container's own: `Database` and `VectorIndex`
+        # open separate connections to it, which WAL makes safe.
+        self.path = config.db_path(self.persist_path, self.container)
+        self.db = Database(self.path)
+        self.vectors = VectorIndex(self.container, self.path)
         self.graph = MemoryGraph(self.db, self.container)
         self.consolidator = Consolidator(self.db, self.vectors, self.graph, self.container)
         self.retriever = Retriever(self.db, self.vectors, self.graph, self.container)
@@ -121,7 +153,7 @@ class MemoOS:
         return self.retriever.search(query, top_k=top_k, use_graph=use_graph,
                                      memory_type=memory_type, touch=touch)
 
-    def recall_as_context(self, query: str, top_k: int = 3,
+    def recall_as_context(self, query: str, top_k: Optional[int] = None,
                           include_types: bool = False) -> str:
         """
         Retrieved memories formatted for a system prompt.
@@ -131,22 +163,10 @@ class MemoOS:
         irrelevant is free to ignore them rather than forced to
         rationalise them into the answer.
         """
-        results = self.search(query, top_k=top_k)
-        if not results:
-            return ""
-
-        seen: set[str] = set()
-        lines: List[str] = []
-        for result in results:
-            text = result.memory.text.strip()
-            key = text.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            label = f" [{result.memory.memory_type.value}]" if include_types else ""
-            lines.append(f"-{label} {text}")
-
-        return "\n".join(lines)
+        results = self.search(
+            query, top_k=top_k if top_k is not None else config.CONTEXT_TOP_K
+        )
+        return format_as_context(results, include_types=include_types)
 
     def get(self, memory_id: str) -> Optional[Memory]:
         return self.db.get_memory(memory_id)

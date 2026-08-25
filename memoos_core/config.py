@@ -8,6 +8,7 @@ deployment without edits.
 """
 
 import os
+import re
 
 
 def _env_str(name: str, default: str) -> str:
@@ -77,18 +78,73 @@ LLM_JSON_RETRIES = _env_int("MEMOOS_LLM_JSON_RETRIES", 2)
 
 
 # --------------------------------------------------------------- storage
+#
+# One container, one file. Everything a user has — their journal, their
+# memories, the entities and relations between them, and the embeddings
+# that make them searchable — lives in a single SQLite database named
+# after them. Nothing about a user is stored anywhere else.
+#
+# That is a deliberate constraint, and it exists so the store can be
+# handed to something bigger later. A single file is what replication
+# understands: Litestream streams it to S3, Turso hosts it, rsync and
+# Dropbox move it, and `cp` backs it up. The moment user state is split
+# across a database and a sidecar index directory, none of that works
+# without a custom sync protocol to keep the halves consistent.
+#
+# Per-user rather than one shared file follows from the same logic:
+# exporting, migrating or deleting one user is a filesystem operation,
+# and a tenant can be moved to the cloud without dragging the others
+# along.
 
 DATA_DIR = _env_str("MEMOOS_DATA_DIR", "./memoos_data")
+CONTAINERS_DIRNAME = "containers"
+DB_SUFFIX = ".db"
+
+# Kept only so an older single-file store can still be found and
+# migrated. Nothing writes here any more.
 DB_FILENAME = "memoos.db"
-VECTOR_DIRNAME = "vectors"
+
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def db_path(data_dir: str | None = None) -> str:
-    return os.path.join(data_dir or DATA_DIR, DB_FILENAME)
+def safe_container(name: str) -> str:
+    """
+    A container name reduced to something safe to put in a filename.
+
+    Container names come from directory basenames, so they arrive with
+    spaces, slashes and the occasional emoji. Everything outside
+    [A-Za-z0-9._-] collapses to a dash, and leading dots and dashes are
+    stripped — which also means `..` and `/` cannot survive to become a
+    path traversal out of the containers directory.
+    """
+    cleaned = _UNSAFE_NAME.sub("-", (name or "").strip().lower()).strip("-._")
+    return cleaned or "default"
 
 
-def vector_path(data_dir: str | None = None) -> str:
-    return os.path.join(data_dir or DATA_DIR, VECTOR_DIRNAME)
+def containers_dir(data_dir: str | None = None) -> str:
+    return os.path.join(data_dir or DATA_DIR, CONTAINERS_DIRNAME)
+
+
+def db_path(data_dir: str | None = None, container: str | None = None) -> str:
+    """
+    The one file holding everything about `container`.
+
+    With no container this returns the legacy shared database, which is
+    what `migrate_legacy_store` reads and nothing writes.
+    """
+    if container is None:
+        return os.path.join(data_dir or DATA_DIR, DB_FILENAME)
+    return os.path.join(containers_dir(data_dir),
+                        safe_container(container) + DB_SUFFIX)
+
+
+def stored_containers(data_dir: str | None = None) -> list[str]:
+    """Every container with a file on disk, alphabetically."""
+    directory = containers_dir(data_dir)
+    if not os.path.isdir(directory):
+        return []
+    return sorted(name[:-len(DB_SUFFIX)] for name in os.listdir(directory)
+                  if name.endswith(DB_SUFFIX))
 
 
 # ------------------------------------------------------------- retrieval
@@ -163,6 +219,12 @@ RECALL_MIN_SIMILARITY_CORROBORATED = _env_float(
     "MEMOOS_RECALL_MIN_SIMILARITY_CORROBORATED", 0.40)
 RECALL_MIN_SIMILARITY_VECTOR_ONLY = _env_float(
     "MEMOOS_RECALL_MIN_SIMILARITY_VECTOR_ONLY", 0.48)
+
+# How many memories get folded into a general reply as context. Kept
+# small on purpose: this is a prompt budget, not a recall target, and
+# padding it with marginal hits gives the model more to be distracted by
+# rather than more to be right about.
+CONTEXT_TOP_K = _env_int("MEMOOS_CONTEXT_TOP_K", 3)
 
 
 # --------------------------------------------------------- consolidation

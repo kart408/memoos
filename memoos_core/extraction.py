@@ -228,11 +228,52 @@ def _as_memory_type(value) -> MemoryType:
         return MemoryType.FACT
 
 
+# Sentence shapes that describe the *input format* rather than the work.
+_SCAFFOLDING = re.compile(
+    r"""^(?:the\s+)?(?:
+          (?:files?|commands?|entities|memories|notes?|sessions?)\s+
+              (?:involved|listed|mentioned|run|executed|that\s+failed|the\s+user\s+ran)
+        | \d+\s+\w+\s+(?:are|were|is|was)\s+(?:involved|listed|mentioned)
+        | (?:work\s+)?session\s+(?:in|on|for)\b
+        )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_scaffolding(text: str) -> bool:
+    return bool(_SCAFFOLDING.match(text.strip()))
+
+
 def _as_entity_type(value) -> EntityType:
     try:
         return EntityType(str(value).strip().lower())
     except ValueError:
         return EntityType.OTHER
+
+
+# Names that carry no information. The first group is the model echoing
+# the *type* field back as if it were a thing ("tech", "org"); the second
+# is scaffolding language from the prompt. Both produce graph nodes you
+# cannot learn anything from — a node labelled "tech" tells you nothing
+# about what the project is.
+JUNK_ENTITY_NAMES = {
+    "tech", "org", "person", "place", "event", "other", "thing", "entity",
+    "name", "type", "user", "the user", "me", "i", "it", "they", "we",
+    "project", "file", "files", "command", "commands", "session", "code",
+    "text", "data", "none", "null", "n/a", "unknown", "example",
+}
+
+
+def _is_junk_entity(name: str) -> bool:
+    stripped = name.strip().strip("'\"`.,").lower()
+    if not stripped or stripped in JUNK_ENTITY_NAMES:
+        return True
+    # A bare number is a count, not a thing; a single character is noise.
+    if len(stripped) < 2 or stripped.replace(".", "").isdigit():
+        return True
+    # A date is when something happened, not a thing it happened to. As a
+    # node it connects every memory made that day to every other one.
+    return bool(re.fullmatch(r"[\d]{1,4}[-/][\d]{1,2}[-/][\d]{1,4}", stripped))
 
 
 def _parse_entities(raw) -> List[ExtractedEntity]:
@@ -252,8 +293,11 @@ def _parse_entities(raw) -> List[ExtractedEntity]:
         # "User" is the implicit subject of every memory; storing it as an
         # entity would link every memory to every other one and make graph
         # expansion useless.
-        if not name or name.lower() in {"user", "the user", "me", "i"}:
+        if not name or _is_junk_entity(name):
             continue
+        # Quoting drifts between calls — 'memoos' and memoos are the same
+        # project, and should not become two nodes.
+        name = name.strip().strip("'\"`")
         entities.append(ExtractedEntity(name=name, entity_type=entity_type))
     return entities
 
@@ -280,9 +324,22 @@ def _parse_relations(raw) -> List[ExtractedRelation]:
 # ------------------------------------------------------------ public API
 
 
+class ExtractionUnavailable(RuntimeError):
+    """
+    The model could not be reached, or never returned usable JSON.
+
+    Distinct from "this text held nothing worth remembering", which is an
+    empty list and a perfectly good outcome. Collapsing the two is how a
+    timeout comes to look like a quiet afternoon: the caller sees no
+    memories, assumes there were none, marks the source as processed, and
+    the content is gone for good.
+    """
+
+
 def extract_memories(text: str, *, model: Optional[str] = None,
                      check_grounding: bool = True,
-                     subject_scoped: bool = True) -> List[ExtractedMemory]:
+                     subject_scoped: bool = True,
+                     strict: bool = False) -> List[ExtractedMemory]:
     """
     Extract structured memories from a piece of text.
 
@@ -295,6 +352,11 @@ def extract_memories(text: str, *, model: Optional[str] = None,
     Returns an empty list when there is nothing worth remembering, or
     when the model fails to produce usable output — never raises, because
     one bad extraction should cost one memory, not the whole ingest.
+
+    Pass `strict=True` to raise `ExtractionUnavailable` instead when the
+    *call itself* failed. Callers that will mark their source as
+    processed afterwards want this: without it they cannot tell a chunk
+    that said nothing from a chunk they never managed to read.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -311,6 +373,11 @@ def extract_memories(text: str, *, model: Optional[str] = None,
         model=model or config.EXTRACT_MODEL,
     )
     if payload is None:
+        if strict:
+            raise ExtractionUnavailable(
+                f"extraction model {model or config.EXTRACT_MODEL!r} returned "
+                f"nothing usable for {len(cleaned.split())} words"
+            )
         return []
 
     # Accept both {"memories": [...]} and a bare [...] — models emit both.
@@ -338,6 +405,14 @@ def extract_memories(text: str, *, model: Optional[str] = None,
 
         # A model that echoes the prompt's placeholder is a failed call.
         if memory_text.strip(". ") in {"...", "..", "text"}:
+            continue
+
+        # A memory has to say something you could act on or be reminded
+        # by. These shapes never do: they are the digest's own scaffolding
+        # read back as fact ("Files involved: a.py, b.py"), or a count of
+        # something nobody asked about ("22 files are involved"). They also
+        # crowd out real memories, because they are recent and they rank.
+        if _is_scaffolding(memory_text):
             continue
 
         key = memory_text.lower()

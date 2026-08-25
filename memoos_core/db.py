@@ -35,7 +35,7 @@ from .models import (
 )
 from .text_utils import normalise_name, significant_tokens
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -152,6 +152,30 @@ CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(container, subject
 CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(container, object_id);
 CREATE INDEX IF NOT EXISTS idx_relations_memory ON relations(memory_id);
 """
+
+# Kept apart from `_SCHEMA` because `vectors.VectorIndex` opens its own
+# connection to this same file and applies it there too. One definition,
+# so the two can never drift into disagreeing about the table they share.
+#
+# The vector is a raw float32 buffer rather than JSON: 384 floats cost
+# 1536 bytes packed against roughly 8KB of text, and unpacking is a
+# memoryview rather than a parse. `model` is recorded so a change of
+# embedding model is detectable — vectors from two different models are
+# not comparable, and silently mixing them makes search quietly wrong
+# rather than loudly broken.
+EMBEDDINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS embeddings (
+    memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    container  TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    model      TEXT NOT NULL DEFAULT '',
+    vector     BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_container ON embeddings(container, dim);
+"""
+
+_SCHEMA = _SCHEMA + EMBEDDINGS_SCHEMA
 
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
@@ -454,8 +478,48 @@ class Database:
             )
 
     def delete_memory(self, memory_id: str) -> None:
+        """
+        Remove a memory, and the graph data that existed only to describe it.
+
+        Foreign keys cascade the memory_entities links, but that is not
+        enough on its own: an entity row outlives its last mention, and a
+        relation outlives the memory it was drawn from — leaving a graph
+        that talks about memories the store no longer holds. Emptying a
+        container would still report entities "discovered", which is how
+        a demo came to list a city before anyone had mentioned it.
+
+        Entities mentioned elsewhere are kept, with their count re-derived
+        from the links that actually survive.
+        """
         with self.transaction() as conn:
+            entity_ids = [
+                row["entity_id"] for row in conn.execute(
+                    "SELECT entity_id FROM memory_entities WHERE memory_id = ?",
+                    (memory_id,),
+                ).fetchall()
+            ]
+
+            # An edge is only as good as the memory it was drawn from.
+            conn.execute("DELETE FROM relations WHERE memory_id = ?", (memory_id,))
             conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+
+            # The link rows are gone by cascade, so count what remains
+            # rather than decrementing — a re-derived count self-heals,
+            # a decremented one drifts.
+            for entity_id in entity_ids:
+                remaining = conn.execute(
+                    "SELECT COUNT(*) AS n FROM memory_entities WHERE entity_id = ?",
+                    (entity_id,),
+                ).fetchone()["n"]
+                if remaining:
+                    conn.execute(
+                        "UPDATE entities SET mention_count = ? WHERE id = ?",
+                        (remaining, entity_id),
+                    )
+                else:
+                    # Last mention gone. Deleting the entity cascades any
+                    # relations still hanging off it as subject or object.
+                    conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
 
     def keyword_search(self, container: str, query: str,
                        limit: int = 30) -> List[Tuple[str, float]]:
@@ -493,10 +557,18 @@ class Database:
             return None
 
         with self.transaction() as conn:
+            # Matched on name alone, not name *and* type. The type is the
+            # model's guess and it is not stable — the same "memoos" comes
+            # back as org one call and other the next, and matching on both
+            # turned one project into two nodes sitting side by side in the
+            # graph with the mentions split between them. A thing is the
+            # thing it is; the type is a label on it. Prefer the most-seen
+            # row so the surviving label is the one guessed most often.
             row = conn.execute(
                 """SELECT * FROM entities
-                   WHERE container = ? AND norm_name = ? AND entity_type = ?""",
-                (container, norm, entity_type.value),
+                   WHERE container = ? AND norm_name = ?
+                   ORDER BY mention_count DESC LIMIT 1""",
+                (container, norm),
             ).fetchone()
 
             if row:

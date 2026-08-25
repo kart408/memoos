@@ -83,12 +83,19 @@ class IngestionPipeline:
                                     status=DocumentStatus.EXTRACTING)
 
             extracted: List[tuple[str, ExtractedMemory]] = []
+            result.chunks_total = len(chunks)
             for chunk_id, chunk in zip(chunk_ids, chunks):
                 try:
-                    for item in extract_memories(chunk, subject_scoped=subject_scoped):
+                    for item in extract_memories(chunk, subject_scoped=subject_scoped,
+                                                 strict=True):
                         extracted.append((chunk_id, item))
                 except Exception:
-                    # One unparseable chunk shouldn't sink the document.
+                    # One unreadable chunk shouldn't sink the document — but
+                    # it must be counted. Swallowing it made a timed-out
+                    # chunk indistinguishable from an uneventful one, and a
+                    # caller that then marked its source as processed threw
+                    # the content away without ever knowing it existed.
+                    result.chunks_failed += 1
                     continue
 
             self.db.update_document(document.id, status=DocumentStatus.EMBEDDING)
