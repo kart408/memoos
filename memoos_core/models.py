@@ -213,10 +213,24 @@ class IngestResult(BaseModel):
     entities: List[Entity] = Field(default_factory=list)
     relations: List[Relation] = Field(default_factory=list)
 
+    # How much of the input actually made it through extraction. A caller
+    # that is about to mark its source as processed needs to know whether
+    # any of it was silently skipped.
+    chunks_total: int = 0
+    chunks_failed: int = 0
+
+    @property
+    def complete(self) -> bool:
+        """Did every chunk reach the model successfully?"""
+        return self.chunks_failed == 0
+
     @property
     def summary(self) -> str:
-        return (
+        text = (
             f"{len(self.created)} new, {len(self.superseded)} superseded, "
             f"{len(self.duplicates)} duplicate, {len(self.entities)} entities, "
             f"{len(self.relations)} relations"
         )
+        if self.chunks_failed:
+            text += f" ({self.chunks_failed} of {self.chunks_total} chunks failed)"
+        return text

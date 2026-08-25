@@ -52,22 +52,10 @@ def _call(prompt: str, *, model: str, system: Optional[str], temperature: float,
     return response.json().get("response", "").strip()
 
 
-def generate(prompt: str, *, system: Optional[str] = None, temperature: float = 0.7,
-             model: Optional[str] = None, timeout: Optional[int] = None) -> str:
-    """Free-text generation. Defaults to the chat model."""
-    return _call(
-        prompt,
-        model=model or config.CHAT_MODEL,
-        system=system,
-        temperature=temperature,
-        json_mode=False,
-        timeout=timeout or config.LLM_TIMEOUT,
-    )
-
-
-def generate_reply(prompt: str, temperature: float = 0.7) -> str:
-    """Backwards-compatible alias used by the chat/assistant layers."""
-    return generate(prompt, temperature=temperature)
+# Free-text generation lived here, for the chat assistant. Both are gone:
+# MemoOS extracts and retrieves, it does not converse. What remains is
+# JSON mode, which is what the extraction and conflict-judging prompts
+# need — a model used as a parser, not as a speaker.
 
 
 # ------------------------------------------------------------ JSON mode

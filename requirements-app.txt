@@ -13,3 +13,4 @@ requests>=2.31
 
 # Only needed to run test_memoos.py — fastapi's TestClient is built on it.
 httpx>=0.27
+python-multipart

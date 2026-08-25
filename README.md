@@ -26,6 +26,76 @@ retriever, and *"what food should she avoid"* finds a peanut allergy.
 
 ---
 
+## Memory for your terminal
+
+A shell forgets everything the moment you close it. Scrollback is not memory —
+it is a transcript with no index, no structure, and no idea what mattered.
+Reopen the window tomorrow and the work you were three hours into is gone.
+
+`memoos` puts a memory layer underneath the terminal:
+
+```bash
+python memoos_cli.py install     # writes the zsh hook to ~/.memoos/memoos.zsh
+echo 'source ~/.memoos/memoos.zsh' >> ~/.zshrc
+```
+
+Then work normally. Every command, its exit code, your Claude Code prompts and
+your own notes are journalled as they happen. Later, they are folded into
+atomic memories and an entity graph:
+
+```bash
+memoos recall            # what was I doing in this project?
+memoos recall "why did the auth tests fail"    # semantic search
+memoos distill           # fold the journal into memory (runs the model)
+memoos graph             # the entities, and how they connect
+memoos ingest NOTES.md   # teach it about you or the project
+memoos serve             # the dashboard, with the graph drawn
+```
+
+Memory is scoped to the **git project you are standing in**. Projects never see
+each other's memory.
+
+### Connecting and disconnecting
+
+Attaching memory to a shell is not a commitment. Some work is worth
+remembering and some is not.
+
+```bash
+memoos disconnect          # stop recording, everywhere, immediately
+memoos connect             # resume
+memoos disconnect --here   # this terminal only
+memoos status              # which state you are in, and what is stored
+```
+
+Terminals already open respect the switch on their next command — the hook
+tests for it rather than caching it, so disconnecting never means "open a new
+window first". There is a toggle in the dashboard that does the same thing.
+
+**Only recording is switched.** `recall`, `search` and the graph keep working
+while disconnected, because declining to record today says nothing about what
+you learned yesterday.
+
+### Two speeds, on purpose
+
+The split between journalling and distilling is the whole design.
+
+| | writes | cost | when |
+| --- | --- | --- | --- |
+| **Journal** | raw events, verbatim | ~0.3 ms | every command |
+| **Distil** | atomic memories + graph | ~seconds/minutes | session end, or on demand |
+
+A shell hook runs before *every* prompt you see, so the write path imports no
+Chroma, no embedding model and no LLM — it appends a row and returns.
+Interpretation is expensive and belongs nowhere near the prompt you are
+waiting on. Recall, meanwhile, needs structure, and structure is exactly what
+raw scrollback lacks.
+
+Reading is kept fast the same way: memories live in SQLite, so `memoos recall`
+answers from plain SQL in about a tenth of a second including Python startup.
+Only *semantic* search loads the vector store.
+
+---
+
 ## Quickstart
 
 **1. Install Ollama and pull an embedding model.**
@@ -118,8 +188,8 @@ far away it is.
 ### Optional fact extraction
 
 Raw conversational text makes poor memories. Pass `"extract": true` and the
-input goes through a local chat model first, which distils it into standalone
-facts before anything is stored:
+input goes through a local extraction model first, which distils it into
+standalone facts before anything is stored:
 
 ```jsonc
 POST /users/alice/memories
@@ -256,23 +326,27 @@ All optional, all environment variables.
 
 ## Scope
 
-**This is a memory layer, and only that.** No chatbot UI, no
-retrieval-augmented generation over documents, no auth system, and no cloud
-model calls of any kind.
+**This is a memory layer, and only that.** No chatbot, no auth system, and no
+cloud model calls of any kind. A local model is used, but only as a *parser* —
+it turns text into structured facts. Nothing here generates a reply, and
+nothing talks back.
 
-### Also in this repository
+### The two halves of this repository
 
-`memoos_core/` is an earlier, more experimental engine exploring what a memory
-system can do beyond storage and recall: LLM-based fact extraction into atomic
-memories, an entity graph, hybrid retrieval fusing vector + BM25 + graph
-expansion, contradiction detection with supersession history, and
-time-based decay. It has its own dependencies (`requirements.txt` — chromadb
-and sentence-transformers) and its own demo entry point:
+`app/` is a tight, tested, multi-tenant HTTP service: store text under a
+`user_id`, search it semantically, and never leak between tenants. It depends
+on SQLite and one embedding model. That is the API documented above.
+
+`memoos_core/` is the richer engine, and what the terminal layer and the
+dashboard are built on: extraction into atomic memories, an entity graph,
+hybrid retrieval fusing vector + BM25 + graph expansion, contradiction
+detection with supersession history, and time-based decay. It has its own
+dependencies (`requirements.txt` — chromadb and sentence-transformers):
 
 ```bash
 pip install -r requirements.txt
-python main.py
+python memoos_cli.py serve    # dashboard at http://127.0.0.1:8000/
+python main.py                # the pipeline, end to end, in the terminal
 ```
 
-The two are independent. `app/` is the tight, tested service; `memoos_core/`
-is the research sketch some of its ideas came from.
+The two are independent, and share only ideas.
