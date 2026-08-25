@@ -200,6 +200,14 @@ class Journal:
                 [(stamp, eid) for eid in event_ids],
             )
 
+    def pending_count(self, container: str) -> int:
+        """How many events are waiting to be folded into memory."""
+        with self._connect(container, create=False) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM events WHERE container = ? AND distilled_at IS NULL",
+                (container,),
+            ).fetchone()[0]
+
     def forget(self, container: str) -> int:
         with self._connect(container) as conn:
             cur = conn.execute("DELETE FROM events WHERE container = ?", (container,))
