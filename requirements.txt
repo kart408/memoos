@@ -1,7 +1,15 @@
-# The memoos_core engine.
+# MemoOS — memory for your terminal.
 #
-# chromadb is gone: vectors live in the same SQLite file as the memories
-# they belong to, and search is a numpy dot product over them.
-sentence-transformers>=3.0.0
-numpy>=1.26
-pydantic>=2.0.0
+# Vectors live in the same SQLite file as the memories they belong to,
+# so there is no vector-store dependency: search is a numpy dot product.
+
+# The engine.
+sentence-transformers>=3.0.0     # embeddings (pulls torch, ~2GB)
+numpy>=1.26                      # vector search
+pydantic>=2.0.0                  # memory/document shapes
+requests>=2.31                   # talking to Ollama
+
+# The dashboard (api.py, `memoos serve`).
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart                 # file upload on the ingest endpoint

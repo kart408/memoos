@@ -33,7 +33,7 @@ fi
 # Fail here, with the fix, rather than at the health check with a log path.
 if ! "$PYTHON" -c "import uvicorn, fastapi" 2>/dev/null; then
   echo "ERROR: uvicorn/fastapi are not installed for $PYTHON."
-  echo "       Run: $PYTHON -m pip install -r requirements-app.txt"
+  echo "       Run: $PYTHON -m pip install -r requirements.txt"
   exit 1
 fi
 
