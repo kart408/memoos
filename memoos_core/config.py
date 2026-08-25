@@ -33,11 +33,11 @@ def _env_float(name: str, default: float) -> float:
 
 OLLAMA_URL = _env_str("MEMOOS_OLLAMA_URL", "http://localhost:11434")
 
-# Two model *roles*, deliberately separate. Extraction is the quality
-# bottleneck of the whole system — a bad extraction poisons every future
-# retrieval — so it gets the strongest local model available. Chat replies
-# are more forgiving and can use the smaller, faster fine-tune.
-CHAT_MODEL = _env_str("MEMOOS_CHAT_MODEL", "memoos-model")
+# Extraction is the quality bottleneck of the whole system — a bad
+# extraction poisons every future retrieval — so it gets the strongest
+# local model available. It is also the *only* model role left here: the
+# engine parses, it never speaks, so there is nothing for a chat model
+# to do.
 EXTRACT_MODEL = _env_str("MEMOOS_EXTRACT_MODEL", "mistral:latest")
 
 # Retrieval here is *asymmetric*: short questions on one side ("what
