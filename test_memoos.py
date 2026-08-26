@@ -1008,6 +1008,70 @@ def test_api_validates_every_container_name() -> None:
     check("no route takes a container without validating it", unguarded, [])
 
 
+@reports
+def test_looking_around_is_not_work() -> None:
+    section("noise filter")
+
+    from memoos_core.journal import COMMAND
+    from memoos_core.terminal import build_digest, is_noise
+
+    # A command line is usually several commands, and the old rule gave
+    # up on the first pipe — so `ps aux | grep -E "uvicorn|api.py"`
+    # counted as real work and became a permanent memory, with `ps aux`
+    # as a graph node on top. A pipeline is noise exactly when all of its
+    # stages are.
+    for command in ('ps aux | grep -E "uvicorn|api.py" | grep -v grep',
+                    "find . -type d -name memoos",
+                    "grep -rn TODO .",
+                    "kill 5938 && pkill ollama",
+                    "cat api.py", "cd memoos", "ls -la", "git status"):
+        ok(f"noise: {command[:40]}", is_noise(command))
+
+    for command in ("./start_demo.sh", "git commit -m x", "npm install pyjwt",
+                    "pytest", "cat data.json | python load.py"):
+        ok(f"real work: {command[:40]}", not is_noise(command))
+
+    # A redirect is what actually says something was written, and it
+    # settles the line on its own.
+    ok("a redirect makes it work", not is_noise("cat api.py > backup.py"))
+    ok("even from a noise command", not is_noise("echo x > file"))
+
+    # Separators inside quotes are arguments, not structure. Splitting on
+    # them produced stages called `"uvicorn` and `api.py`, neither of
+    # which is a command.
+    ok("a pipe inside a quoted string is not a separator",
+       not is_noise('git commit -m "fix a|b thing"'))
+
+    # Arguments can turn an inspection into a write.
+    ok("find that looks is noise", is_noise("find . -name '*.py'"))
+    ok("find that deletes is not", not is_noise("find . -name '*.tmp' -delete"))
+
+    # --- Ctrl-C is not a failure ---
+    #
+    # A shell reports a signalled process as 128 + signal. Stopping a
+    # server you started on purpose was being written down as "the demo
+    # script failed with exit code 130", which reads as a bug in the demo.
+    stopped = build_digest("p", [{"kind": COMMAND, "text": "./start_demo.sh",
+                                  "exit_code": 130}])
+    ok("an interrupted command is not reported as failed",
+       "failed" not in stopped)
+    ok("but it is still remembered", "start_demo.sh" in stopped)
+
+    for code in (1, 2, 139):   # 139 is SIGSEGV — a genuine crash
+        broke = build_digest("p", [{"kind": COMMAND, "text": "./build.sh",
+                                    "exit_code": code}])
+        ok(f"exit {code} still reads as a failure", "failed" in broke)
+
+    # --- and the shell verbs do not become graph nodes ---
+    from memoos_core.extraction import _is_junk_entity
+
+    for name in ("ps aux", "find", "grep", "kill", "cat", "sleep"):
+        ok(f"not a node: {name}", _is_junk_entity(name))
+    # Tool names that are genuine project facts must survive.
+    for name in ("Docker", "pytest", "git", "npm", "api.py", "PostgreSQL"):
+        ok(f"still a node: {name}", not _is_junk_entity(name))
+
+
 def main() -> int:
     print(f"scratch store: {SCRATCH}")
     for test in (test_paths, test_journal_isolation,
@@ -1024,6 +1088,7 @@ def main() -> int:
                  test_writes_survive_an_unreachable_model,
                  test_entity_names_worth_having,
                  test_a_request_is_not_a_memory,
+                 test_looking_around_is_not_work,
                  test_past_signals_are_surfaced_not_acted_on,
                  test_out_of_scope_questions_return_nothing,
                  test_api_validates_every_container_name,

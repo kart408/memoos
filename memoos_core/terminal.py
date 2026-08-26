@@ -45,7 +45,75 @@ NOISE = {
     # memories, and `sleep` and `kill` both became graph entities.
     "sleep", "kill", "pkill", "killall", "jobs", "bg", "fg", "wait",
     "ps", "uptime", "df", "du", "free", "open", "say", "clear",
+    # Searching and filtering. Looking for a thing is not doing anything
+    # to it — `find` and a `ps aux | grep` pipeline both became permanent
+    # memories, and both became graph entities on top of that.
+    #
+    # `sed` is deliberately absent: `sed -i` edits in place, so it is a
+    # write wearing an inspection's clothes. Same reason `xargs` is out —
+    # what it does depends entirely on what follows it.
+    "find", "grep", "egrep", "fgrep", "rg", "ag", "locate", "awk",
+    "sort", "uniq", "cut", "diff", "file", "stat", "basename",
+    "dirname", "realpath", "column", "jq", "cat",
 }
+
+# Commands whose *arguments* turn an inspection into a write. `find .`
+# is looking around; `find . -delete` is not.
+_NOT_REALLY_LOOKING = {
+    "find": ("-delete", "-exec", "-execdir", "-ok"),
+}
+
+def _split_stages(text: str) -> tuple[List[str], bool]:
+    """
+    Split a command line into its stages, and say whether it redirects.
+
+    Written as a scanner rather than a regex because the separators live
+    inside quoted arguments too, and splitting on those is how
+    `ps aux | grep -E "uvicorn|api.py|main.py"` came apart into stages
+    called `"uvicorn` and `api.py` — neither of which is a command, so
+    the whole pipeline read as real work and became a memory.
+
+    Returns (stages, redirects). A redirect is reported separately
+    because it settles the question on its own: something was written.
+    """
+    stages: List[str] = []
+    current: List[str] = []
+    quote = ""
+    redirects = False
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == ">":
+            redirects = True
+            index += 1
+            continue
+        if text.startswith(("&&", "||"), index):
+            stages.append("".join(current))
+            current = []
+            index += 2
+            continue
+        if char in "|;":
+            stages.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+
+    stages.append("".join(current))
+    return [s.strip() for s in stages if s.strip()], redirects
 NOISE_PAIRS = {
     ("git", "status"), ("git", "log"), ("git", "diff"), ("git", "branch"),
     ("git", "show"), ("git", "stash"), ("ls", "-la"),
@@ -55,20 +123,54 @@ NOISE_PAIRS = {
 _FILE_LIKE = re.compile(r"[\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sh|sql|md|json|ya?ml|toml|html|css)")
 
 
-def is_noise(command: str) -> bool:
-    """Is this command pure navigation, with nothing to remember?"""
-    parts = command.strip().split()
+def _stage_is_noise(stage: str) -> bool:
+    """Is one command in a pipeline pure looking-around?"""
+    parts = stage.split()
     if not parts:
         return True
     head = os.path.basename(parts[0])
-    if head in NOISE and len(parts) == 1:
-        return True
-    if head in NOISE and head not in {"git"}:
-        # `cat api.py` is inspection; `echo x > file` is not.
-        return not any(c in command for c in (">", ">>", "|"))
     if len(parts) >= 2 and (head, parts[1]) in NOISE_PAIRS:
         return True
-    return False
+    if head not in NOISE:
+        return False
+    forbidden = _NOT_REALLY_LOOKING.get(head, ())
+    return not any(flag in parts for flag in forbidden)
+
+
+# Exit codes that mean "somebody stopped this", not "this broke".
+#
+# A shell reports a signalled process as 128 + signal. 130 is Ctrl-C,
+# which is how you stop a server you started on purpose — and it was
+# being written into memory as "the demo script failed with exit code
+# 130", which reads as a bug in the demo. Only the user-initiated
+# signals are listed: 134 (SIGABRT) and 139 (SIGSEGV) are genuine
+# crashes and stay failures.
+INTERRUPTED = {129, 130, 143}   # SIGHUP, SIGINT, SIGTERM
+
+
+def is_noise(command: str) -> bool:
+    """
+    Is this command pure navigation, with nothing to remember?
+
+    Judged per stage, because a command line is usually several commands
+    and the old rule gave up on the first `|`. That is how
+    `ps aux | grep -E "uvicorn|api.py" | grep -v grep` became a permanent
+    memory: a pipe was read as "this does something", when every stage of
+    that one is looking around. A pipeline is noise exactly when all of
+    its stages are — `cat data.json | python load.py` still is not,
+    because `python` is work.
+
+    A redirect is the real signal that something was written, and it
+    short-circuits the whole line: `cat api.py` is inspection,
+    `cat api.py > backup.py` is not.
+    """
+    text = command.strip()
+    if not text:
+        return True
+    stages, redirects = _split_stages(text)
+    if redirects:
+        return False
+    return bool(stages) and all(_stage_is_noise(s) for s in stages)
 
 
 def files_in(text: str) -> List[str]:
@@ -272,7 +374,10 @@ def build_digest(container: str, events: List[Dict[str, Any]]) -> str:
                 continue
             phrase = describe_command(text)
             code = event.get("exit_code")
-            if code not in (0, None):
+            if code in INTERRUPTED:
+                # Stopping a thing you started is not the thing failing.
+                say(f"The user {phrase}")
+            elif code not in (0, None):
                 # Same past-tense phrase either way. "tried to ran the
                 # tests" is what you get from bolting an infinitive frame
                 # onto a past-tense verb, and a memory that reads wrong

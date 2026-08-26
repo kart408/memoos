@@ -363,6 +363,17 @@ JUNK_ENTITY_NAMES = {
     "name", "type", "user", "the user", "me", "i", "it", "they", "we",
     "project", "file", "files", "command", "commands", "session", "code",
     "text", "data", "none", "null", "n/a", "unknown", "example",
+    # Shell verbs the model lifted out of a command line. `ps aux` became
+    # a node with two mentions, outranking the project's own name — but a
+    # node labelled `find` tells you nothing about what anyone was doing,
+    # and it links every session that ever looked something up.
+    #
+    # Tool names that can be genuine project facts are deliberately
+    # absent: "the project uses Docker" is worth a node, and so are git,
+    # npm, pytest and python.
+    "find", "grep", "ps", "ps aux", "ls", "cd", "kill", "pkill", "sleep",
+    "awk", "sed", "cat", "echo", "head", "tail", "sort", "uniq", "wc",
+    "chmod", "mkdir", "touch", "rm", "mv", "cp", "xargs", "which",
 }
 
 
