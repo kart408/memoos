@@ -963,6 +963,51 @@ def test_out_of_scope_questions_return_nothing() -> None:
     memo.close()
 
 
+@reports
+def test_api_validates_every_container_name() -> None:
+    section("api guard")
+
+    # Five endpoints took a container and never checked it. The split
+    # showed as an inconsistency — the same name got 400 from /memories
+    # and 200 from /stats — and `POST /note`, which writes, accepted
+    # anything and brought a container file into existence named after
+    # it. Traversal was never possible (safe_container collapses it),
+    # but a write path with no guard on its tenant key is a bug whether
+    # or not it is exploitable.
+    import api
+
+    # Rejected: characters that cannot be in a filename, and lengths that
+    # cannot be one.
+    for name in ("evil!!name", "has space", "with/slash", "", "a" * 600):
+        try:
+            api.valid_container(name)
+            ok(f"rejected: {name[:18]!r}", False)
+        except api.HTTPException as error:
+            check(f"rejected with 400: {name[:18]!r}", error.status_code, 400)
+
+    # Accepted and normalised: the name that picks the file has to be the
+    # name the queries filter on, or a container writes rows into its own
+    # file under a label nothing else ever reads.
+    check("case is folded", api.valid_container("MyProj"), "myproj")
+    check("leading punctuation is stripped", api.valid_container("-leading"), "leading")
+    check("an already-safe name is unchanged", api.valid_container("memoos"), "memoos")
+
+    # Every route taking a container must go through the guard, so this
+    # cannot drift back apart one endpoint at a time.
+    import inspect, re
+    source = inspect.getsource(api)
+    unguarded = []
+    for block in re.split(r"\n@app\.", source)[1:]:
+        route = block.split("\n")[0]
+        name = re.search(r"def (\w+)", block)
+        if "{container}" not in route or not name:
+            continue
+        body = block.split("\n@app.")[0]
+        if "valid_container(" not in body and "layer(container)" not in body:
+            unguarded.append(name.group(1))
+    check("no route takes a container without validating it", unguarded, [])
+
+
 def main() -> int:
     print(f"scratch store: {SCRATCH}")
     for test in (test_paths, test_journal_isolation,
@@ -981,6 +1026,7 @@ def main() -> int:
                  test_a_request_is_not_a_memory,
                  test_past_signals_are_surfaced_not_acted_on,
                  test_out_of_scope_questions_return_nothing,
+                 test_api_validates_every_container_name,
                  test_relation_only_entities_are_linked):
         try:
             test()
