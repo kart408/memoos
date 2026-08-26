@@ -439,6 +439,27 @@ def test_global_container_reaches_every_command() -> None:
     check("an empty column does not blow up",
           memoos_cli.type_labels([]), [])
 
+    # `distill` reports the nodes it touched, and one entry arrives per
+    # *attachment* — so a node mentioned by two memories printed as
+    # `start_demo.sh, start_demo.sh`, which reads as two nodes sitting
+    # side by side when the graph holds one.
+    from memoos_core.models import Entity
+
+    node = Entity(container="cli", name="start_demo.sh", norm_name="start demo sh")
+    other = Entity(container="cli", name="api.py", norm_name="api py")
+    check("a node attached twice is named once",
+          memoos_cli.entity_names([node, node, other]),
+          ["start_demo.sh", "api.py"])
+
+    # Deduped by id, not by label: `upsert_entity` matches on the
+    # normalised name, so two spellings are one node arriving twice.
+    spelled = Entity(container="cli", name="Start_Demo.sh",
+                     norm_name="start demo sh")
+    spelled.id = node.id
+    check("and two spellings of one node are still one",
+          memoos_cli.entity_names([node, spelled]), ["start_demo.sh"])
+    check("nothing touched, nothing named", memoos_cli.entity_names([]), [])
+
 
 # ------------------------------------------------------------- pipeline
 

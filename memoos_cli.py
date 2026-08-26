@@ -71,7 +71,7 @@ import argparse  # noqa: E402
 import threading  # noqa: E402
 import webbrowser  # noqa: E402
 import json  # noqa: E402
-from typing import List, Sequence  # noqa: E402
+from typing import Dict, List, Sequence  # noqa: E402
 
 from memoos_core import quick  # noqa: E402
 from memoos_core.journal import Journal, container_for  # noqa: E402
@@ -121,6 +121,26 @@ def type_labels(types: Sequence[str]) -> List[str]:
     """
     width = max((len(t) for t in types), default=0) + 2
     return [("[" + t + "]").ljust(width) for t in types]
+
+
+def entity_names(entities: Sequence) -> List[str]:
+    """
+    The distinct nodes a distil touched, in the order it touched them.
+
+    One entry arrives per *attachment*, so a node mentioned by three
+    memories came back three times and printed as `start_demo.sh,
+    start_demo.sh` — which reads as two nodes sitting side by side when
+    the graph holds one, the exact confusion the store works to avoid.
+
+    Deduped by id rather than by name, because the node is the thing
+    being reported: `upsert_entity` matches on the normalised name, so
+    two spellings that normalise alike are one node arriving twice under
+    different labels.
+    """
+    seen: Dict[str, str] = {}
+    for entity in entities:
+        seen.setdefault(entity.id, entity.name)
+    return list(seen.values())
 
 
 def cmd_recall(args) -> int:
@@ -426,7 +446,7 @@ def _distill(args) -> int:
         print(f"  {green('+')} {magenta('[' + m.memory_type.value + ']')} {m.text}")
     for m in result.get("superseded", []):
         print(f"  {yellow('~')} superseded: {dim(m.text)}")
-    names = [e.name for e in result.get("entities", [])]
+    names = entity_names(result.get("entities", []))
     if names:
         print(f"\n  entities: {', '.join(names)}")
     print()
