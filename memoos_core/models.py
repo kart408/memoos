@@ -183,6 +183,20 @@ class Document(BaseModel):
     status: DocumentStatus = DocumentStatus.QUEUED
     error: Optional[str] = None
     chunk_count: int = 0
+
+    # How many memories this ingest *produced*, not how many are still
+    # active. The two diverge the moment one is deleted or superseded,
+    # and that divergence is correct: this column is provenance, and
+    # provenance records what happened. A real store reads 24 here with
+    # 23 active, because one was removed afterwards.
+    #
+    # Recomputing it to match the live count would make the record lie
+    # about the ingest — you would lose the ability to tell "this
+    # document yielded little" from "this document yielded plenty and
+    # most of it was later retired", which is exactly the question you
+    # ask when a source turns out to be low quality. Count active
+    # memories with a query against `memories` when that is what you
+    # want; leave this one alone.
     memory_count: int = 0
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

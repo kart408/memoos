@@ -462,6 +462,35 @@ nothing talks back.
 
 ---
 
+## Accepted behaviour
+
+Two things look like bugs on inspection and are not. Both are recorded here
+because the tempting fix for each is worse than the thing it fixes.
+
+**Near-duplicates just below the threshold stay separate.** The store holds
+
+```
+"The user encountered an issue with running './start_demo.sh' in the Mac terminal."
+"The user encountered an error with './start_demo.sh'."
+```
+
+at cosine 0.9224, against a `DUPLICATE_THRESHOLD` of 0.93. That reads as one
+thing said twice, and merging it means moving a *global* threshold that judges
+every write in every container. A wrong merge destroys information silently; a
+redundant memory is merely untidy. That asymmetry is the whole argument, and it
+does not justify 0.008. To merge a specific pair, supersede one explicitly —
+local decision, local blast radius.
+
+**`documents.memory_count` is history, not a live tally.** A document reading
+24 alongside 23 active memories is correct: 24 is what that ingest produced,
+and one was deleted afterwards. Recomputing it would lose the distinction
+between "this source yielded little" and "this source yielded plenty and most
+was later retired" — which is exactly the question worth asking of a source
+that turned out to be low quality. Count `memories` directly when you want the
+live number.
+
+---
+
 ## Testing
 
 ```bash

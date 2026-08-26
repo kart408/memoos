@@ -288,6 +288,25 @@ CONTEXT_TOP_K = _env_int("MEMOOS_CONTEXT_TOP_K", 3)
 
 # Cosine similarity above which two memories are treated as the same fact
 # restated, and merged without asking the LLM.
+#
+# Accepted behaviour: a pair that lands just under this stays as two
+# memories, and that is the intended outcome rather than a miss. A real
+# store holds these two at 0.9224 —
+#
+#     "The user encountered an issue with running './start_demo.sh'
+#      in the Mac terminal."
+#     "The user encountered an error with './start_demo.sh'."
+#
+# — which reads as one thing said twice, and is tempting to merge by
+# nudging the threshold down. Do not. This number is calibrated against
+# measured pairs, and it is global: every write in every container is
+# judged by it. Buying one cosmetic merge at 0.92 costs correctness on
+# every genuinely distinct pair sitting in the same band, and a wrong
+# merge destroys information silently while a redundant memory is
+# merely untidy. The asymmetry is the whole argument.
+#
+# If a specific pair really must merge, supersede one explicitly. That
+# is a local decision with a local blast radius.
 DUPLICATE_THRESHOLD = _env_float("MEMOOS_DUPLICATE_THRESHOLD", 0.93)
 
 # Cosine similarity above which two memories are *related enough* that a
