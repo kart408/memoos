@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from memoos_core import config, connection, quick
-from memoos_core.journal import Journal, container_for
+from memoos_core.journal import NOTE, Journal, container_for
 from memoos_core.models import MemoryStatus
 from memoos_core.terminal import TerminalMemory, import_claude_sessions
 
@@ -46,13 +46,19 @@ _VALID = re.compile(r"^[A-Za-z0-9._-]{0,502}[A-Za-z0-9]$")
 _layers: Dict[str, TerminalMemory] = {}
 
 
-def layer(container: str) -> TerminalMemory:
+def valid_container(container: str) -> str:
     """
-    The terminal memory for one project, cached across requests.
+    Reject a name that cannot be a container, and normalise the rest.
 
-    Cached because constructing one is cheap but *using* one loads the
-    embedding model, and paying three and a half seconds per request
-    would make the dashboard unusable.
+    Every endpoint taking a container goes through here, including the
+    ones that never build a `layer`. Five of them used to skip it, and
+    the split showed: the same name got 400 from `/memories` and 200
+    from `/stats`, and `POST /note` — which *writes* — accepted anything
+    and brought a container file into existence named after it.
+
+    Normalising is the other half. `db_path` normalises when choosing the
+    file, so a name that survives un-normalised opens one container's
+    file and writes rows into it under a label nothing else queries.
     """
     if not _VALID.match(container):
         raise HTTPException(
@@ -60,10 +66,19 @@ def layer(container: str) -> TerminalMemory:
             "container names may use letters, digits, dot, dash and underscore, "
             "and must end with a letter or digit",
         )
-    # Normalised before it is cached, so "MyProj" and "myproj" are one
-    # entry pointing at the one file, rather than two layers writing two
-    # sets of rows into it under labels that never see each other.
-    container = config.safe_container(container)
+    return config.safe_container(container)
+
+
+def layer(container: str) -> TerminalMemory:
+    """
+    The terminal memory for one project, cached across requests.
+
+    Cached because constructing one is cheap but *using* one loads the
+    embedding model, and paying three and a half seconds per request
+    would make the dashboard unusable. Keyed on the normalised name, so
+    "MyProj" and "myproj" are one entry pointing at the one file.
+    """
+    container = valid_container(container)
     if container not in _layers:
         _layers[container] = TerminalMemory(container=container)
     return _layers[container]
@@ -87,6 +102,7 @@ def projects() -> Dict[str, Any]:
 
 @app.get("/projects/{container}/stats")
 def stats(container: str) -> Dict[str, Any]:
+    container = valid_container(container)
     journal = Journal()
     data = quick.counts(container)
     data["sessions"] = len(journal.sessions(container, limit=10_000))
@@ -159,6 +175,7 @@ def graph(container: str, limit: int = 60) -> Dict[str, Any]:
     Ids are stable strings the client can key on; nothing here requires
     the view to resolve a database id itself.
     """
+    container = valid_container(container)
     entities = quick.top_entities(container, limit=limit)
     known = {e["name"] for e in entities}
 
@@ -261,21 +278,26 @@ def memory_source(container: str, memory_id: str) -> Dict[str, Any]:
 
 @app.get("/projects/{container}/sessions")
 def sessions(container: str, limit: int = 30) -> Dict[str, Any]:
-    return {"sessions": Journal().sessions(container, limit=limit)}
+    return {"sessions": Journal().sessions(valid_container(container),
+                                           limit=limit)}
 
 
 @app.get("/projects/{container}/events")
 def events(container: str, session: Optional[str] = None,
            limit: int = 300) -> Dict[str, Any]:
-    return {"events": Journal().events(container, session_id=session, limit=limit)}
+    return {"events": Journal().events(valid_container(container),
+                                      session_id=session, limit=limit)}
 
 
 @app.post("/projects/{container}/note")
 def note(container: str, payload: Dict[str, str]) -> Dict[str, str]:
+    # Validated *before* the write. This endpoint accepted any name and
+    # created a container file to match it.
+    container = valid_container(container)
     text = (payload.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "note text is required")
-    return {"id": Journal().record("note", text, container=container,
+    return {"id": Journal().record(NOTE, text, container=container,
                                    session_id="dashboard")}
 
 
