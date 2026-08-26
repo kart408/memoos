@@ -874,6 +874,95 @@ def test_past_signals_are_surfaced_not_acted_on() -> None:
     memo.close()
 
 
+@reports
+def test_out_of_scope_questions_return_nothing() -> None:
+    section("scope gate")
+
+    # Search returns its nearest neighbours however distant — that is
+    # what nearest-neighbour means, and for `search()` it is the right
+    # contract, since the caller can see the scores. A context block
+    # cannot: it goes into somebody else's prompt with every number
+    # stripped off. Asked who won the world cup, a real store offered
+    # three memories about itself at cosine 0.49.
+    from memoos_core import config
+    from memoos_core.models import Memory, MemoryQueryResult
+    from memoos_core.retrieval import in_scope
+
+    CORR = config.RECALL_MIN_SIMILARITY_CORROBORATED   # 0.40
+    VEC = config.RECALL_MIN_SIMILARITY_VECTOR_ONLY     # 0.48
+
+    def result(text, similarity, matched_by):
+        return MemoryQueryResult(
+            memory=Memory(container="gate", text=text),
+            score=0.016, vector_score=similarity, matched_by=list(matched_by))
+
+    # --- borderline: the calibrated bars, exactly ---
+    at_bar = result("the deploy runs on Vercel", VEC, ["vector"])
+    under = result("the deploy runs on Vercel", VEC - 0.01, ["vector"])
+    check("a vector-only hit exactly at the bar is kept",
+          len(in_scope([at_bar])), 1)
+    check("one hair under it is not", len(in_scope([under])), 0)
+
+    # Agreement from a second retriever is evidence, and buys the lower
+    # bar — but only when it rests on the user's own words.
+    agreed = result("the deploy runs on Vercel", CORR, ["vector", "keyword"])
+    check("corroborated, at the lower bar, sharing a word with the query",
+          len(in_scope([agreed], query="how does the deploy work")), 1)
+    check("the same hit is held to the strict bar when the query shares nothing",
+          len(in_scope([agreed], query="who is my sister")), 0)
+
+    # The reason that distinction exists: expansion can manufacture
+    # agreement. Asked "who is my sister", the probe harvested `main` and
+    # `master` off the nearest memories and searched for "who is my
+    # sister main master"; the keyword retriever matched on two words the
+    # user never typed and the vector search had just invented. That is
+    # echoing, not agreeing, and it let cosine 0.428 through a 0.48 bar.
+    echoed = result("The master branch was renamed to main.", 0.428,
+                    ["vector", "keyword"])
+    check("manufactured corroboration does not buy the lower bar",
+          len(in_scope([echoed], query="who is my sister")), 0)
+
+    # A hit with no vector opinion arrived on a literal token or a shared
+    # entity. That is concrete evidence, not a distance, and judging it
+    # by a cosine it does not have would throw away the half of hybrid
+    # search that exists for rare names and IDs.
+    lexical = result("deploy id 8fa21c failed", None, ["keyword"])
+    check("a keyword-only hit is kept", len(in_scope([lexical])), 1)
+
+    # --- in scope vs out of scope, end to end ---
+    from memoos_core import MemoOS
+
+    memo = MemoOS(container="scope")
+    for text in ("The project uses PostgreSQL as its database.",
+                 "The project is deployed on Vercel.",
+                 "The project uses Next.js for the frontend."):
+        memo.add(text)
+
+    asked = memo.context_for("what database does the project use", top_k=3)
+    ok("an in-scope question still returns memories", bool(asked["results"]))
+    ok("and the right one leads",
+       "PostgreSQL" in asked["results"][0].memory.text)
+    ok("with a context block to hand over", "PostgreSQL" in asked["context"])
+
+    for question in ("what is 2 plus 2",
+                     "what is the capital of France"):
+        empty = memo.context_for(question, top_k=3)
+        check(f"out of scope returns nothing: {question!r}",
+              len(empty["results"]), 0)
+        check("and an empty block rather than a confident wrong one",
+              empty["context"], "")
+        # Nothing relevant means nothing to scope signals to. Reporting
+        # them anyway would answer an out-of-scope question with the
+        # project's entire failure history.
+        check("and no signals", len(empty["signals"]), 0)
+
+    # The gate is on the handover, not on search: a caller that can see
+    # the scores still gets everything, which is the existing contract.
+    ungated = memo.context_for("what is 2 plus 2", top_k=3, gate=False)
+    ok("search itself is unchanged", bool(ungated["results"]))
+    memo.close()
+
+
 def main() -> int:
     print(f"scratch store: {SCRATCH}")
     for test in (test_paths, test_journal_isolation,
@@ -891,6 +980,7 @@ def main() -> int:
                  test_entity_names_worth_having,
                  test_a_request_is_not_a_memory,
                  test_past_signals_are_surfaced_not_acted_on,
+                 test_out_of_scope_questions_return_nothing,
                  test_relation_only_entities_are_linked):
         try:
             test()

@@ -204,6 +204,31 @@ expansion can only ever add terms this project already knows.
 `--json` gives an agent the block plus each memory's score, type, validity and
 why it matched.
 
+An out-of-scope question comes back empty rather than with three confident
+irrelevancies:
+
+```console
+$ memoos context "what is the capital of France"
+
+  nothing remembered about that in memoos
+```
+
+That needs a gate, because search has no "I don't know" state — it returns its
+nearest neighbours however distant, which is the right contract for a caller
+that can see the scores and the wrong one for a block that goes into a prompt
+with every number stripped off. BGE rates *completely unrelated* text at ~0.46
+cosine, so asked who won the world cup this store offered three memories about
+itself. The bars are `RECALL_MIN_SIMILARITY_*`, calibrated against measured
+pairs and orphaned since the chat layer that used them was deleted; the gate
+only wires them back up.
+
+Corroboration from a second retriever buys a lower bar — but only when it rests
+on your own words. Query expansion can manufacture agreement: asked "who is my
+sister" the probe harvested `main` and `master` off the nearest memories and
+searched for *"who is my sister main master"*, so the keyword retriever matched
+on two words nobody typed and the vector search had just invented. That is
+echoing, not agreeing, and it let cosine 0.428 through a 0.48 bar.
+
 **MemoOS stops here.** It does not answer. The agent that asked is the only
 thing that knows what you are actually trying to do, and a memory layer that
 also wrote the reply would be guessing at that.
@@ -497,13 +522,13 @@ live number.
 python test_memoos.py
 ```
 
-160 assertions against a scratch data directory — it never touches your real
+176 assertions against a scratch data directory — it never touches your real
 store. No Ollama and no extraction model are needed, and that is enforced
 rather than assumed: one of the tests points the client at a dead port and
 checks the write path still completes.
 
 ```
-  160 passed, 0 failed
+  176 passed, 0 failed
 ```
 
 It also runs under `pytest`, and now actually fails there. The assertions
