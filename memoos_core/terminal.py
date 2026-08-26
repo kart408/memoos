@@ -26,8 +26,8 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from . import config
 from .journal import CLAUDE, COMMAND, GIT, NOTE, Journal, container_for
@@ -286,7 +286,8 @@ class TerminalMemory:
 
     def __init__(self, container: Optional[str] = None,
                  persist_path: Optional[str] = None):
-        self.container = container or container_for()
+        self.container = config.safe_container(container) if container \
+            else container_for()
         self.persist_path = persist_path or config.DATA_DIR
         self.journal = Journal(data_dir=self.persist_path)
         self._memo = None
@@ -338,7 +339,15 @@ class TerminalMemory:
                     "skipped": "no signal in this session"}
 
         title = f"terminal session {session_id or 'recent'} — {self.container}"
-        result = self.memo.ingest_document(digest, title=title, source="terminal")
+        # The event ids travel with the document, which is what lets a
+        # memory be traced back past the digest to the commands that
+        # produced it. Without them the trail stops at "some session".
+        result = self.memo.ingest_document(
+            digest, title=title, source="terminal",
+            metadata={"event_ids": [e["id"] for e in events],
+                      "session_id": session_id,
+                      "session_ids": sorted({e["session_id"] for e in events})},
+        )
 
         # Only retire events the model actually read. If a chunk timed out,
         # leaving its events pending costs a re-run; marking them done
@@ -481,7 +490,9 @@ def is_filler(text: str) -> bool:
     # ("deploy to staging") is kept — brevity is not emptiness.
     if len(stripped) < MIN_PROMPT_CHARS:
         first = stripped.split(",")[0].split()[:2]
-        return " ".join(first) in FILLER or (first and first[0] in FILLER)
+        if not first:
+            return True   # no words at all is as empty as steering gets
+        return " ".join(first) in FILLER or first[0] in FILLER
     return False
 
 

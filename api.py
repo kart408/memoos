@@ -22,7 +22,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from memoos_core import connection, quick
+from memoos_core import config, connection, quick
 from memoos_core.journal import Journal, container_for
 from memoos_core.models import MemoryStatus
 from memoos_core.terminal import TerminalMemory, import_claude_sessions
@@ -38,10 +38,9 @@ app.add_middleware(
 
 DASHBOARD = Path(__file__).parent / "demo.html"
 
-# A container name ends up inside a Chroma collection name, which accepts
-# only [A-Za-z0-9._-] and must end alphanumerically. Rejecting it here
-# turns what was an opaque 500 from deep in the vector store into an
-# answer the caller can act on.
+# A container name becomes a filename, so it accepts only [A-Za-z0-9._-]
+# and must end alphanumerically. Rejecting it here turns what would be an
+# opaque failure deep in the store into an answer the caller can act on.
 _VALID = re.compile(r"^[A-Za-z0-9._-]{0,502}[A-Za-z0-9]$")
 
 _layers: Dict[str, TerminalMemory] = {}
@@ -61,6 +60,10 @@ def layer(container: str) -> TerminalMemory:
             "container names may use letters, digits, dot, dash and underscore, "
             "and must end with a letter or digit",
         )
+    # Normalised before it is cached, so "MyProj" and "myproj" are one
+    # entry pointing at the one file, rather than two layers writing two
+    # sets of rows into it under labels that never see each other.
+    container = config.safe_container(container)
     if container not in _layers:
         _layers[container] = TerminalMemory(container=container)
     return _layers[container]
@@ -208,6 +211,32 @@ def search(container: str, q: str = Query(..., min_length=1),
     """
     results = layer(container).memo.search(q, top_k=top_k, touch=False)
     return {"query": q, "results": results}
+
+
+@app.get("/projects/{container}/context")
+def context(container: str, q: str = Query(..., min_length=1),
+            top_k: int = 5, include_stale: bool = False) -> Dict[str, Any]:
+    """
+    The handover endpoint: what an agent should know before this task.
+
+    This is where MemoOS stops. It returns the context block, the
+    memories behind it, and the expansion that found them — and nothing
+    generated. The agent on the other end does the work and does the
+    answering; it is the only thing that knows what the user actually
+    asked for.
+    """
+    return layer(container).memo.context_for(
+        q, top_k=top_k, include_stale=include_stale
+    )
+
+
+@app.get("/projects/{container}/memories/{memory_id}/source")
+def memory_source(container: str, memory_id: str) -> Dict[str, Any]:
+    """Trace a memory back to the passage and the events it came from."""
+    trail = layer(container).memo.source(memory_id)
+    if trail is None:
+        raise HTTPException(404, "no such memory")
+    return trail
 
 
 # -------------------------------------------------------------- journal

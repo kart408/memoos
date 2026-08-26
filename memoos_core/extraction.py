@@ -41,11 +41,12 @@ EXTRACTION_SYSTEM = (
 EXTRACTION_PROMPT = """Extract every durable fact worth remembering from the message below.
 
 Rules:
-- Write each memory as a standalone third-person sentence about "User". It must still make sense years from now with no other context. Never write "I" or "me". Never write "there", "then" or "it" - name the thing.
+- Write each memory as a standalone third-person sentence whose subject is named: "User" for something about the person, "The project" for something about the codebase. It must still make sense years from now with no other context. Never write "I" or "me". Never write "there", "then" or "it" - name the thing.
 - One idea per memory. Split compound statements into separate memories.
 - Use ONLY information stated in the message. Never infer, expand, or add.
 - Ignore questions, greetings, and small talk. If nothing is worth remembering, return {{"memories": []}}.
-- "type" is one of: fact, event, preference, skill, goal, relationship
+- "type" is one of: fact, event, preference, skill, goal, relationship, decision, problem, solution
+- Use "problem" for something that broke or blocked, "solution" for what fixed it, and "decision" for a choice that was made. A failure and its fix are two memories, not one.
 - "importance" is 0.0-1.0. Identity, location, work and long-term commitments are 0.8+. Passing detail is 0.3.
 - "entities" are named things actually mentioned. "type" is one of: person, place, org, tech, event, other
 - "relations" are triples between two named entities from this message. Use snake_case predicates. Omit if there are none.
@@ -59,6 +60,14 @@ Example output:
   {{"text": "User moved to Delhi.", "type": "event", "importance": 0.9, "entities": [{{"name": "Delhi", "type": "place"}}], "relations": []}},
   {{"text": "User is doing an internship at Zomato.", "type": "event", "importance": 0.9, "entities": [{{"name": "Zomato", "type": "org"}}], "relations": [{{"subject": "User", "predicate": "interns_at", "object": "Zomato"}}]}},
   {{"text": "User switched from PyTorch to JAX.", "type": "preference", "importance": 0.7, "entities": [{{"name": "PyTorch", "type": "tech"}}, {{"name": "JAX", "type": "tech"}}], "relations": []}}
+]}}
+
+Example message: "The user ran the tests in test_auth.py, and it failed with exit code 1. The user installed the Python package pyjwt. The user edited api.py. The user ran the tests in test_auth.py."
+Example output:
+{{"memories": [
+  {{"text": "The authentication tests in test_auth.py were failing.", "type": "problem", "importance": 0.7, "entities": [{{"name": "test_auth.py", "type": "tech"}}], "relations": []}},
+  {{"text": "The project uses the pyjwt library.", "type": "fact", "importance": 0.8, "entities": [{{"name": "pyjwt", "type": "tech"}}], "relations": []}},
+  {{"text": "Editing api.py made the authentication tests pass.", "type": "solution", "importance": 0.8, "entities": [{{"name": "api.py", "type": "tech"}}], "relations": []}}
 ]}}
 
 Example message: "what's the weather like today?"
@@ -270,6 +279,13 @@ def _is_junk_entity(name: str) -> bool:
         return True
     # A bare number is a count, not a thing; a single character is noise.
     if len(stripped) < 2 or stripped.replace(".", "").isdigit():
+        return True
+    # An absolute path is a location on one machine, not a thing the
+    # project is about. `api.py` is worth a node and recurs across
+    # sessions; `/Users/someone/proj/venv/bin/activate` is the same file
+    # under a name nobody else will ever write, and it turns up in
+    # expansions as a wall of text that says nothing.
+    if stripped.startswith(("/", "~/")) or stripped.count("/") >= 3:
         return True
     # A date is when something happened, not a thing it happened to. As a
     # node it connects every memory made that day to every other one.

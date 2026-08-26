@@ -18,6 +18,18 @@ from typing import Any, Dict, List, Optional
 from . import config
 
 
+def _key(container: str) -> str:
+    """
+    The one spelling of a container name — see `Journal._key`.
+
+    Every function here picks its file with `config.db_path` (which
+    normalises) and then filters on the name it was handed (which did
+    not). A name that normalises therefore opened the right file and
+    matched nothing in it.
+    """
+    return config.safe_container(container)
+
+
 def _connect(container: str, path: Optional[str] = None) -> sqlite3.Connection:
     """
     Open the file this container's data lives in, read-only in spirit.
@@ -50,6 +62,7 @@ def _has_tables(conn: sqlite3.Connection) -> bool:
 
 def recent_memories(container: str, limit: int = 8,
                     path: Optional[str] = None) -> List[Dict[str, Any]]:
+    container = _key(container)
     with _connect(container, path) as conn:
         if not _has_tables(conn):
             return []
@@ -65,6 +78,7 @@ def recent_memories(container: str, limit: int = 8,
 
 def top_entities(container: str, limit: int = 12,
                  path: Optional[str] = None) -> List[Dict[str, Any]]:
+    container = _key(container)
     with _connect(container, path) as conn:
         if not _has_tables(conn):
             return []
@@ -80,6 +94,7 @@ def top_entities(container: str, limit: int = 12,
 
 def relations(container: str, limit: int = 60,
               path: Optional[str] = None) -> List[Dict[str, Any]]:
+    container = _key(container)
     with _connect(container, path) as conn:
         if not _has_tables(conn):
             return []
@@ -96,6 +111,7 @@ def relations(container: str, limit: int = 60,
 
 
 def counts(container: str, path: Optional[str] = None) -> Dict[str, int]:
+    container = _key(container)
     with _connect(container, path) as conn:
         if not _has_tables(conn):
             return {"memories": 0, "entities": 0, "relations": 0}
@@ -118,6 +134,7 @@ def memory_links(container: str, limit: int = 400,
     graph legible — every memory hangs off the things it talks about, so
     you can see at a glance that six memories all concern api.py.
     """
+    container = _key(container)
     with _connect(container, path) as conn:
         if not _has_tables(conn):
             return []

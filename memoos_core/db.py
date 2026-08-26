@@ -35,7 +35,7 @@ from .models import (
 )
 from .text_utils import normalise_name, significant_tokens
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS memories (
     confidence       REAL NOT NULL DEFAULT 0.8,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
+    valid_from       TEXT,
+    valid_until      TEXT,
     last_accessed_at TEXT,
     access_count     INTEGER NOT NULL DEFAULT 0,
     status           TEXT NOT NULL DEFAULT 'active',
@@ -177,6 +179,21 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_container ON embeddings(container, dim
 
 _SCHEMA = _SCHEMA + EMBEDDINGS_SCHEMA
 
+# Indexes over columns that arrived after the first release.
+#
+# These cannot sit in `_SCHEMA`. On a store that already exists, `CREATE
+# TABLE IF NOT EXISTS` does nothing — so the column an index names is not
+# there yet, the statement fails, and it takes the rest of the script
+# with it. On the only file that matters, the one holding a year of
+# memories, that turned an upgrade into a hard failure at open. They run
+# after `_add_missing_columns` instead.
+_LATE_INDEXES = """
+-- "what is true right now" is the commonest read there is, and it is a
+-- status filter plus an open-ended validity test.
+CREATE INDEX IF NOT EXISTS idx_memories_current
+    ON memories(container, status, valid_until);
+"""
+
 _WORD = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -259,12 +276,48 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            # Order matters, and it is the reverse of the obvious one:
+            # tables first, then the columns a migration added, and only
+            # then the indexes that name those columns.
             self._conn.executescript(_SCHEMA)
+            self._add_missing_columns()
+            self._conn.executescript(_LATE_INDEXES)
             self._conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._conn.commit()
+
+    # Columns added after a store was first written. `CREATE TABLE IF NOT
+    # EXISTS` does nothing to a table that already exists, so a schema
+    # grown a column would apply cleanly to a fresh file and not at all
+    # to the one holding a year of memories — which is the only file that
+    # matters. Adding them explicitly is what makes an upgrade in place
+    # possible rather than a re-ingest.
+    _ADDED_COLUMNS = (
+        ("memories", "valid_from", "TEXT"),
+        ("memories", "valid_until", "TEXT"),
+    )
+
+    def _add_missing_columns(self) -> None:
+        for table, column, kind in self._ADDED_COLUMNS:
+            present = {row["name"] for row in
+                       self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in present:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+
+        # Every pre-existing memory was valid from the moment it was
+        # written, and is still valid unless something superseded it —
+        # in which case the supersession stamp is exactly when it stopped.
+        # Back-filling from columns already on the row means an upgraded
+        # store answers temporal questions about its own history, rather
+        # than starting the clock today.
+        self._conn.execute(
+            "UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL")
+        self._conn.execute(
+            """UPDATE memories SET valid_until = superseded_at
+                WHERE valid_until IS NULL AND superseded_at IS NOT NULL""")
 
     @contextmanager
     def transaction(self):
@@ -275,6 +328,24 @@ class Database:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def _fetchall(self, sql: str, params: Sequence[Any] = ()) -> List[sqlite3.Row]:
+        """
+        Run a read under the same lock every write takes.
+
+        One connection shared across FastAPI's thread pool is only safe
+        while *every* statement is serialised. Reads that skipped the
+        lock raced the writers on the same cursor and surfaced as
+        `InterfaceError: bad parameter or other API misuse`, half-built
+        rows, and IndexErrors — intermittently, under load, and nowhere
+        near the code that caused them.
+        """
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def _fetchone(self, sql: str, params: Sequence[Any] = ()) -> Optional[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchone()
 
     def close(self) -> None:
         with self._lock:
@@ -324,16 +395,16 @@ class Database:
             conn.execute(f"UPDATE documents SET {', '.join(fields)} WHERE id = ?", values)
 
     def get_document(self, document_id: str) -> Optional[Document]:
-        row = self._conn.execute(
+        row = self._fetchone(
             "SELECT * FROM documents WHERE id = ?", (document_id,)
-        ).fetchone()
+        )
         return self._row_to_document(row) if row else None
 
     def list_documents(self, container: str, limit: int = 50) -> List[Document]:
-        rows = self._conn.execute(
+        rows = self._fetchall(
             "SELECT * FROM documents WHERE container = ? ORDER BY created_at DESC LIMIT ?",
             (container, limit),
-        ).fetchall()
+        )
         return [self._row_to_document(r) for r in rows]
 
     # ------------------------------------------------------------ chunks
@@ -348,6 +419,11 @@ class Database:
                 [(*r, now) for r in rows],
             )
 
+    def get_chunk(self, chunk_id: str) -> Optional[Dict[str, Any]]:
+        """The exact passage a memory was extracted from."""
+        row = self._fetchone("SELECT * FROM chunks WHERE id = ?", (chunk_id,))
+        return dict(row) if row else None
+
     # ---------------------------------------------------------- memories
 
     def insert_memory(self, memory: Memory) -> Memory:
@@ -355,15 +431,21 @@ class Database:
             conn.execute(
                 """INSERT INTO memories
                    (id, container, text, memory_type, source, document_id, chunk_id,
-                    importance, confidence, created_at, updated_at, last_accessed_at,
+                    importance, confidence, created_at, updated_at,
+                    valid_from, valid_until, last_accessed_at,
                     access_count, status, superseded_by, superseded_at,
                     supersede_reason, metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     memory.id, memory.container, memory.text, memory.memory_type.value,
                     memory.source, memory.document_id, memory.chunk_id,
                     memory.importance, memory.confidence,
                     _iso(memory.created_at), _iso(memory.updated_at),
+                    # A memory with no explicit start held from the moment
+                    # it was learned. Defaulting here rather than on the
+                    # model keeps the column non-null for every row.
+                    _iso(memory.valid_from or memory.created_at),
+                    _iso(memory.valid_until),
                     _iso(memory.last_accessed_at), memory.access_count,
                     memory.status.value, memory.superseded_by,
                     _iso(memory.superseded_at), memory.supersede_reason,
@@ -373,9 +455,9 @@ class Database:
         return memory
 
     def get_memory(self, memory_id: str) -> Optional[Memory]:
-        row = self._conn.execute(
+        row = self._fetchone(
             "SELECT * FROM memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        )
         return self._row_to_memory(row) if row else None
 
     def get_memories(self, memory_ids: Sequence[str]) -> Dict[str, Memory]:
@@ -383,9 +465,9 @@ class Database:
         if not memory_ids:
             return {}
         placeholders = ",".join("?" * len(memory_ids))
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"SELECT * FROM memories WHERE id IN ({placeholders})", tuple(memory_ids)
-        ).fetchall()
+        )
         return {r["id"]: self._row_to_memory(r) for r in rows}
 
     def list_memories(self, container: str, *, status: Optional[MemoryStatus] = MemoryStatus.ACTIVE,
@@ -400,23 +482,23 @@ class Database:
             clauses.append("memory_type = ?")
             values.append(memory_type.value)
         values.extend([limit, offset])
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"""SELECT * FROM memories WHERE {' AND '.join(clauses)}
                 ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             values,
-        ).fetchall()
+        )
         return [self._row_to_memory(r) for r in rows]
 
     def count_memories(self, container: str, status: Optional[MemoryStatus] = None) -> int:
         if status is None:
-            row = self._conn.execute(
+            row = self._fetchone(
                 "SELECT COUNT(*) AS n FROM memories WHERE container = ?", (container,)
-            ).fetchone()
+            )
         else:
-            row = self._conn.execute(
+            row = self._fetchone(
                 "SELECT COUNT(*) AS n FROM memories WHERE container = ? AND status = ?",
                 (container, status.value),
-            ).fetchone()
+            )
         return int(row["n"])
 
     def set_status(self, memory_id: str, status: MemoryStatus) -> None:
@@ -428,14 +510,24 @@ class Database:
 
     def mark_superseded(self, old_id: str, new_id: str, reason: str = "",
                         status: MemoryStatus = MemoryStatus.SUPERSEDED) -> None:
+        """
+        Retire a memory in favour of a newer one, and close its interval.
+
+        `valid_until` is stamped in the same statement as the status, not
+        as a follow-up write. The two describe one event — this stopped
+        being true, and here is what replaced it — and a crash between
+        two separate updates would leave a retired memory that still
+        reads as currently valid.
+        """
         now = _iso(datetime.now(timezone.utc))
         with self.transaction() as conn:
             conn.execute(
                 """UPDATE memories
                    SET status = ?, superseded_by = ?, superseded_at = ?,
-                       supersede_reason = ?, updated_at = ?
+                       supersede_reason = ?, updated_at = ?,
+                       valid_until = COALESCE(valid_until, ?)
                    WHERE id = ?""",
-                (status.value, new_id, now, reason, now, old_id),
+                (status.value, new_id, now, reason, now, now, old_id),
             )
 
     def touch(self, memory_ids: Sequence[str]) -> None:
@@ -534,7 +626,7 @@ class Database:
         match = build_fts_query(query)
         if not match:
             return []
-        rows = self._conn.execute(
+        rows = self._fetchall(
             """SELECT m.id AS id, bm25(memories_fts) AS rank
                FROM memories_fts
                JOIN memories m ON m.rowid = memories_fts.rowid
@@ -544,7 +636,7 @@ class Database:
                ORDER BY rank
                LIMIT ?""",
             (match, container, limit),
-        ).fetchall()
+        )
         return [(r["id"], -float(r["rank"])) for r in rows]
 
     # ---------------------------------------------------------- entities
@@ -601,11 +693,11 @@ class Database:
         norm = normalise_entity_name(name)
         if not norm:
             return None
-        row = self._conn.execute(
+        row = self._fetchone(
             """SELECT * FROM entities WHERE container = ? AND norm_name = ?
                ORDER BY mention_count DESC LIMIT 1""",
             (container, norm),
-        ).fetchone()
+        )
         return self._row_to_entity(row) if row else None
 
     def link_memory_entities(self, memory_id: str, entity_ids: Iterable[str]) -> None:
@@ -623,11 +715,11 @@ class Database:
         if not memory_ids:
             return {}
         placeholders = ",".join("?" * len(memory_ids))
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"""SELECT memory_id, entity_id FROM memory_entities
                 WHERE memory_id IN ({placeholders})""",
             tuple(memory_ids),
-        ).fetchall()
+        )
         out: Dict[str, List[str]] = {}
         for r in rows:
             out.setdefault(r["memory_id"], []).append(r["entity_id"])
@@ -651,7 +743,7 @@ class Database:
             exclude_sql = f" AND m.id NOT IN ({','.join('?' * len(exclude))})"
             values.extend(exclude)
         values.append(limit)
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"""SELECT me.memory_id AS memory_id, me.entity_id AS entity_id
                 FROM memory_entities me
                 JOIN memories m ON m.id = me.memory_id
@@ -660,24 +752,24 @@ class Database:
                 ORDER BY m.importance DESC, m.created_at DESC
                 LIMIT ?""",
             values,
-        ).fetchall()
+        )
         return [(r["memory_id"], r["entity_id"]) for r in rows]
 
     def get_entities(self, entity_ids: Sequence[str]) -> Dict[str, Entity]:
         if not entity_ids:
             return {}
         placeholders = ",".join("?" * len(entity_ids))
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"SELECT * FROM entities WHERE id IN ({placeholders})", tuple(entity_ids)
-        ).fetchall()
+        )
         return {r["id"]: self._row_to_entity(r) for r in rows}
 
     def list_entities(self, container: str, limit: int = 100) -> List[Entity]:
-        rows = self._conn.execute(
+        rows = self._fetchall(
             """SELECT * FROM entities WHERE container = ?
                ORDER BY mention_count DESC, created_at DESC LIMIT ?""",
             (container, limit),
-        ).fetchall()
+        )
         return [self._row_to_entity(r) for r in rows]
 
     # --------------------------------------------------------- relations
@@ -718,11 +810,11 @@ class Database:
         if not include_invalid:
             clauses.append("invalidated_at IS NULL")
         values.append(limit)
-        rows = self._conn.execute(
+        rows = self._fetchall(
             f"""SELECT * FROM relations WHERE {' AND '.join(clauses)}
                 ORDER BY created_at DESC LIMIT ?""",
             values,
-        ).fetchall()
+        )
         return [self._row_to_relation(r) for r in rows]
 
     # ------------------------------------------------------ row mapping
@@ -741,6 +833,8 @@ class Database:
             confidence=row["confidence"],
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
+            valid_from=_dt(row["valid_from"]),
+            valid_until=_dt(row["valid_until"]),
             last_accessed_at=_dt(row["last_accessed_at"]),
             access_count=row["access_count"],
             status=MemoryStatus(row["status"]),

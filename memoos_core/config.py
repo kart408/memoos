@@ -35,9 +35,9 @@ OLLAMA_URL = _env_str("MEMOOS_OLLAMA_URL", "http://localhost:11434")
 
 # Extraction is the quality bottleneck of the whole system — a bad
 # extraction poisons every future retrieval — so it gets the strongest
-# local model available. It is also the *only* model role left here: the
+# local model available. It is also the *only* model role there is: the
 # engine parses, it never speaks, so there is nothing for a chat model
-# to do.
+# to do. Answering is the calling agent's job — MemoOS returns context.
 EXTRACT_MODEL = _env_str("MEMOOS_EXTRACT_MODEL", "mistral:latest")
 
 # Retrieval here is *asymmetric*: short questions on one side ("what
@@ -178,6 +178,7 @@ GRAPH_DAMPING = _env_float("MEMOOS_GRAPH_DAMPING", 0.4)
 # Minimum fused score for a result to be worth returning at all.
 MIN_RESULT_SCORE = _env_float("MEMOOS_MIN_RESULT_SCORE", 0.0)
 
+
 # Relevance floor for vector-only matches.
 #
 # Vector search always returns its nearest neighbours, however far away
@@ -187,6 +188,55 @@ MIN_RESULT_SCORE = _env_float("MEMOOS_MIN_RESULT_SCORE", 0.0)
 # A memory that matched only weakly, and matched on no keyword and no
 # entity, is not an answer — it's the least-bad noise available.
 MIN_VECTOR_SIMILARITY = _env_float("MEMOOS_MIN_VECTOR_SIMILARITY", 0.25)
+
+
+# ------------------------------------------------- query understanding
+
+# A question and the memory that answers it often share no vocabulary at
+# all: "how should I deploy this?" against "User deploys the project on
+# Vercel". Vector search bridges that; BM25 cannot, and abstains — which
+# throws away half of hybrid retrieval on exactly the queries that need
+# it most.
+#
+# So the query is expanded first. A cheap vector probe finds the memories
+# that are *about* the question, and the entity names hanging off them
+# become extra search terms: deploy -> Vercel, Next.js. The concepts are
+# read out of the store rather than invented, so expansion can only ever
+# add terms the container actually knows about.
+QUERY_EXPANSION = _env_str("MEMOOS_QUERY_EXPANSION", "1") not in {"0", "false", "no"}
+
+# How many memories the probe looks at before harvesting their entities.
+# Small on purpose: this is a hint for the keyword retriever, not a
+# second retrieval, and a wide probe drags in entities from memories that
+# only barely matched.
+QUERY_PROBE_CANDIDATES = _env_int("MEMOOS_QUERY_PROBE_CANDIDATES", 8)
+
+# Cap on harvested concepts. Past a handful, BM25 is ORing in so many
+# terms that everything matches again — the exact failure expansion was
+# meant to fix.
+QUERY_MAX_CONCEPTS = _env_int("MEMOOS_QUERY_MAX_CONCEPTS", 6)
+
+# A concept has to appear in more than one probe hit, or be attached to
+# the very best one, to count. One mention in a marginal memory is
+# coincidence, not a concept.
+QUERY_MIN_CONCEPT_HITS = _env_int("MEMOOS_QUERY_MIN_CONCEPT_HITS", 2)
+
+# How close a memory has to be to the question before its entities count
+# as concepts.
+#
+# Without this the probe is `top_k` and nothing else, and vector search
+# always returns its nearest neighbours however far away they are — so in
+# a small store the probe returns *everything*, and expansion harvests
+# every entity in the container. "How should I deploy?" came back
+# expanded with `Priya`, the user's sister, and BM25 then matched every
+# memory in the store on it. Fusion had nothing left to discriminate
+# with: the keyword ranker had voted for all of them.
+#
+# Set at the same bar as MIN_VECTOR_SIMILARITY, for the same reason — a
+# weak nearest neighbour is not evidence, it is the least-bad thing
+# available.
+QUERY_PROBE_MIN_SIMILARITY = _env_float(
+    "MEMOOS_QUERY_PROBE_MIN_SIMILARITY", MIN_VECTOR_SIMILARITY)
 
 
 # ---------------------------------------------------------------- recall
@@ -275,6 +325,16 @@ HALF_LIFE_DAYS = {
     "goal": 180.0,
     "relationship": 540.0,
     "event": 120.0,
+
+    # A decision outlives the moment it was taken — "we went with JWT"
+    # is the reason the code looks the way it does, and stays the reason.
+    "decision": 540.0,
+    # A solution is the durable half of a problem: what broke matters for
+    # as long as it might break again, but *how it was fixed* is the part
+    # you go looking for, so it keeps a fact's half-life while the
+    # problem itself fades on an event's.
+    "solution": 540.0,
+    "problem": 180.0,
 }
 DEFAULT_HALF_LIFE_DAYS = _env_float("MEMOOS_DEFAULT_HALF_LIFE_DAYS", 365.0)
 
