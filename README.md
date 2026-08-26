@@ -150,6 +150,7 @@ memoos install        wire it into your shell
 memoos recall         what was I doing here?
 memoos recall "why did the auth tests fail"    semantic search
 memoos context TASK   what an agent should know before starting (--json)
+memoos signals        what has gone wrong here before, and what fixed it
 memoos trace ID       follow a memory back to the commands behind it
 memoos distill        fold this session into memory
 memoos ingest FILE    teach it about you or the project
@@ -206,6 +207,75 @@ why it matched.
 **MemoOS stops here.** It does not answer. The agent that asked is the only
 thing that knows what you are actually trying to do, and a memory layer that
 also wrote the reply would be guessing at that.
+
+---
+
+## Not a dumping ground
+
+A memory has to still be worth knowing next session, and most of what a
+terminal produces is not. The store this was built against had 51 memories,
+**38 of them records of a request** — "User wanted to commit the changes",
+true for thirty seconds, stored forever, ranking against facts that still hold.
+
+The cause was one line. Every imported Claude Code prompt was written into the
+digest as `The user wanted to "X"`, and the extractor faithfully recorded the
+wanting. A request is context for reading the commands that follow; it is never
+a memory. What it *produced* might be, and that is a different sentence.
+
+Re-distilling the same 67 events after the fix:
+
+| | before | after |
+|---|---:|---:|
+| memories | 51 | 26 |
+| records of a request | 38 (74%) | 0 |
+| entities | 22 | 7 |
+
+Fewer memories, and the survivors are state: `The project uses a multi-tenant
+architecture`, `The master branch was renamed to main`, `Editing api.py made the
+authentication tests pass`.
+
+The fix is at the source — the digest no longer asserts intent, and the
+extraction prompt asks for what became true. A deterministic gate backs it up,
+and earned its place immediately: the moment the digest stopped saying "wanted
+to", the model started writing "asked for" instead. Request phrasing is now
+rejected on principle rather than by pattern, while a lasting aim survives,
+because `build` is not a chore and `commit` is.
+
+---
+
+## Past signals
+
+`memoos signals` pairs a `problem` back up with whatever fixed it.
+
+```console
+$ memoos signals
+
+my-app · open problems
+  ! The deploy step times out on Vercel.
+
+known failures, and what fixed them
+  ✗ The authentication tests in test_auth.py were failing.
+    ↳ Editing api.py made the authentication tests pass.
+```
+
+Pairing is by evidence, and the evidence is layered because no single signal
+works. A shared entity is strongest, but requiring it misses the ordinary case —
+the test that broke and the file that fixed it are usually *different* files.
+Coming out of the same session is necessary and nowhere near sufficient: on its
+own it pairs everything with everything, and an afternoon that broke the deploy
+and separately fixed the auth tests would report the auth fix as the answer to
+the deploy timeout. So proximity has to be corroborated by shared wording. A
+solution describes undoing its problem, so the two discuss the same things even
+when they name different files.
+
+These ride along in the context block under a heading of their own, because a
+known failure is a different kind of thing from "the project uses Next.js" — it
+is a warning, and a reader skimming a prompt should see that at a glance.
+
+**Surfaced, never acted on.** Nothing in `signals.py` changes a ranking, retires
+a memory or adjusts a threshold. Deciding what to do about a known failure
+requires knowing what you are trying to do, and that is exactly what a memory
+layer cannot see.
 
 ---
 
@@ -313,6 +383,7 @@ memoos_core/
 ├── db.py            SQLite: memories, documents, entities, relations, FTS5
 ├── vectors.py       embeddings in that same file, searched with numpy
 ├── query.py         question → the terms worth searching for, grounded
+├── signals.py       problems paired with their fixes — reported, not acted on
 ├── retrieval.py     hybrid search: vector + BM25 + graph expansion, fused
 ├── consolidation.py duplicates, contradictions, supersession, decay
 ├── graph.py         the entity graph
@@ -397,13 +468,13 @@ nothing talks back.
 python test_memoos.py
 ```
 
-118 assertions against a scratch data directory — it never touches your real
+160 assertions against a scratch data directory — it never touches your real
 store. No Ollama and no extraction model are needed, and that is enforced
 rather than assumed: one of the tests points the client at a dead port and
 checks the write path still completes.
 
 ```
-  118 passed, 0 failed
+  160 passed, 0 failed
 ```
 
 It also runs under `pytest`, and now actually fails there. The assertions

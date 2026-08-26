@@ -230,6 +230,23 @@ def context(container: str, q: str = Query(..., min_length=1),
     )
 
 
+@app.get("/projects/{container}/signals")
+def project_signals(container: str, limit: int = 25) -> Dict[str, Any]:
+    """
+    What has gone wrong here before, and what fixed it.
+
+    Reported, never acted on. MemoOS does not decide what to do about a
+    known failure — the agent holding the task does, because it is the
+    only thing that can see what the task actually is.
+    """
+    episodes = layer(container).memo.signals(limit=limit)
+    return {
+        "container": container,
+        "open": [e.as_dict() for e in episodes if not e.resolved],
+        "resolved": [e.as_dict() for e in episodes if e.resolved],
+    }
+
+
 @app.get("/projects/{container}/memories/{memory_id}/source")
 def memory_source(container: str, memory_id: str) -> Dict[str, Any]:
     """Trace a memory back to the passage and the events it came from."""

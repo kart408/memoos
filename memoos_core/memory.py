@@ -36,13 +36,15 @@ from .models import (
 from .pipeline import IngestionPipeline
 from .retrieval import Retriever
 from .vectors import VectorIndex
+from . import signals
 
 
 
 
 def format_as_context(results: List[MemoryQueryResult],
                       include_types: bool = False,
-                      project: Optional[str] = None) -> str:
+                      project: Optional[str] = None,
+                      episodes: Optional[List] = None) -> str:
     """
     Render retrieved memories as prompt-ready lines.
 
@@ -75,9 +77,20 @@ def format_as_context(results: List[MemoryQueryResult],
         label = f" [{result.memory.memory_type.value}]" if include_types else ""
         lines.append(f"•{label} {text}")
 
+    block = "\n".join(lines)
+
+    # Past signals get their own heading rather than being mixed in with
+    # the facts. A known failure is a different kind of thing from "the
+    # project uses Next.js" — it is a warning, and a reader skimming a
+    # prompt should be able to see that at a glance.
+    if episodes:
+        rendered = signals.render(episodes)
+        if rendered:
+            block = f"{block}\n\n{rendered}"
+
     if project:
-        return f"Project: {project}\n\n" + "\n".join(lines)
-    return "\n".join(lines)
+        return f"Project: {project}\n\n{block}"
+    return block
 
 
 class MemoOS:
@@ -192,7 +205,8 @@ class MemoOS:
                                  project=self.container)
 
     def context_for(self, task: str, *, top_k: Optional[int] = None,
-                    include_stale: bool = False, touch: bool = False) -> Dict:
+                    include_stale: bool = False, touch: bool = False,
+                    with_signals: bool = True) -> Dict:
         """
         The whole read path, and the last thing MemoOS does.
 
@@ -219,12 +233,24 @@ class MemoOS:
         plan = self.retriever.plan_for(task)
         results = self.retriever.search(task, top_k=wanted, touch=touch,
                                         include_stale=include_stale, plan=plan)
+
+        # Past signals, scoped to what this task touches. Reported, never
+        # acted on: nothing here reorders the results or retires anything.
+        # What to do about a known failure is the calling agent's call,
+        # because it is the only thing that can see the actual task.
+        episodes = signals.episodes_for(
+            self.db, self.container,
+            memory_ids=[r.memory.id for r in results],
+        ) if with_signals else []
+
         return {
             "container": self.container,
             "query": task,
             "plan": plan.as_dict(),
             "results": results,
-            "context": format_as_context(results, project=self.container),
+            "signals": episodes,
+            "context": format_as_context(results, project=self.container,
+                                         episodes=episodes),
         }
 
     def get(self, memory_id: str) -> Optional[Memory]:
@@ -255,6 +281,16 @@ class MemoOS:
                 break
             current = self.db.get_memory(current.superseded_by)
         return chain
+
+    def signals(self, limit: int = 25) -> List:
+        """
+        Every problem/solution episode this project knows about.
+
+        The whole-store view, for a terminal that has just opened and has
+        no task yet. `context_for` gives the same thing scoped to what a
+        specific task touches.
+        """
+        return signals.episodes_for(self.db, self.container, limit=limit)
 
     def source(self, memory_id: str) -> Optional[Dict]:
         """

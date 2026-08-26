@@ -45,6 +45,9 @@ Rules:
 - One idea per memory. Split compound statements into separate memories.
 - Use ONLY information stated in the message. Never infer, expand, or add.
 - Ignore questions, greetings, and small talk. If nothing is worth remembering, return {{"memories": []}}.
+- Record what is TRUE, not what was ASKED FOR. A line starting "The user asked for:" is the request that started the work - it is context for reading what follows, never a memory of its own. "User wanted to commit the changes" is worthless a day later; "The project uses JWT for authentication" is not.
+- Never write a memory of the form "User wanted to X" or "User decided to X" for a one-off action (commit, push, delete, rename, install, run, fix, clean up). Write what became true instead, or write nothing.
+- A long-term aim IS worth keeping: "User is building a local-first memory layer" is a goal that still holds next month. A task from this afternoon is not.
 - "type" is one of: fact, event, preference, skill, goal, relationship, decision, problem, solution
 - Use "problem" for something that broke or blocked, "solution" for what fixed it, and "decision" for a choice that was made. A failure and its fix are two memories, not one.
 - "importance" is 0.0-1.0. Identity, location, work and long-term commitments are 0.8+. Passing detail is 0.3.
@@ -62,13 +65,18 @@ Example output:
   {{"text": "User switched from PyTorch to JAX.", "type": "preference", "importance": 0.7, "entities": [{{"name": "PyTorch", "type": "tech"}}, {{"name": "JAX", "type": "tech"}}], "relations": []}}
 ]}}
 
-Example message: "The user ran the tests in test_auth.py, and it failed with exit code 1. The user installed the Python package pyjwt. The user edited api.py. The user ran the tests in test_auth.py."
-Example output:
+Example message: "The user asked for: Convert auth to JWT. The user installed the Python package pyjwt. The user ran the tests in test_auth.py, and it failed with exit code 1. The user edited api.py. The user ran the tests in test_auth.py. The user committed \"switch auth to JWT\"."
+Example output (note: the request itself is NOT a memory - what it produced is):
 {{"memories": [
-  {{"text": "The authentication tests in test_auth.py were failing.", "type": "problem", "importance": 0.7, "entities": [{{"name": "test_auth.py", "type": "tech"}}], "relations": []}},
+  {{"text": "The project uses JWT for authentication.", "type": "fact", "importance": 0.9, "entities": [{{"name": "JWT", "type": "tech"}}], "relations": []}},
   {{"text": "The project uses the pyjwt library.", "type": "fact", "importance": 0.8, "entities": [{{"name": "pyjwt", "type": "tech"}}], "relations": []}},
+  {{"text": "The authentication tests in test_auth.py were failing.", "type": "problem", "importance": 0.7, "entities": [{{"name": "test_auth.py", "type": "tech"}}], "relations": []}},
   {{"text": "Editing api.py made the authentication tests pass.", "type": "solution", "importance": 0.8, "entities": [{{"name": "api.py", "type": "tech"}}], "relations": []}}
 ]}}
+
+Example message: "The user asked for: commit the changes and open a pull request. The user made a git commit. The user pushed the branch to the remote."
+Example output (a one-off chore that leaves nothing true afterwards):
+{{"memories": []}}
 
 Example message: "what's the weather like today?"
 Example output: {{"memories": []}}
@@ -249,8 +257,93 @@ _SCAFFOLDING = re.compile(
 )
 
 
+# A markdown heading, list bullet or fence swallowed into the middle of
+# a sentence. `_is_junk_entity` already refuses these as node names, but
+# the same string reached the memory *text* untouched and produced "The
+# project uses # MemoOS — Build Instructions for Claude Code as its build
+# instructions." The model is describing the shape of a file it read
+# rather than anything the project is or does.
+_MARKUP_IN_TEXT = re.compile(r"(?:^|\s)(?:#{1,6}\s|```|\|\s*-{2,})")
+
+
 def _is_scaffolding(text: str) -> bool:
-    return bool(_SCAFFOLDING.match(text.strip()))
+    stripped = text.strip()
+    if _SCAFFOLDING.match(stripped):
+        return True
+    return bool(_MARKUP_IN_TEXT.search(stripped))
+
+
+# Verbs naming an action that is finished by the time anyone reads the
+# memory back. Recording that someone *wanted* one of these records
+# nothing that is still true: "User wanted to commit the changes" held
+# for about thirty seconds, and then sat in the store forever, ranking
+# against facts that still hold.
+EPHEMERAL_ACTIONS = frozenset({
+    "commit", "push", "pull", "merge", "rebase", "checkout", "clone",
+    "delete", "remove", "drop", "clear", "clean", "cleanup", "prune",
+    "rename", "publish", "deploy", "revert", "undo", "restore",
+    "kill", "stop", "start", "restart", "run", "rerun", "retry",
+    "open", "close", "continue", "proceed", "finish", "complete",
+    "install", "uninstall", "reinstall", "update", "upgrade",
+    "add", "move", "copy", "replace", "split", "combine", "rerunning",
+    "fix", "debug", "check", "verify", "confirm", "look", "see",
+    "show", "print", "list", "read", "know", "understand", "explain",
+})
+
+# "The user asked for X" — a record of the request itself, whatever X is.
+# Rejected unconditionally, because a request is never a memory: what it
+# produced might be, and that is a different sentence. This pattern is
+# what the model reached for the moment the digest stopped saying
+# "wanted to", which is a good reminder that the prompt is guidance and
+# this is the part that actually holds.
+_REQUEST = re.compile(
+    r"^(?:the\s+)?user\s+"
+    r"(?:ask(?:s|ed)?|request(?:s|ed)?|instruct(?:s|ed)?|told)\b",
+    re.IGNORECASE)
+
+# "The user wanted to <chore>" — transient only when the verb names a
+# chore. The same frame around a lasting aim is worth keeping.
+_INTENT = re.compile(
+    r"^(?:the\s+)?user\s+"
+    r"(?:want(?:s|ed)?|would\s+like|wish(?:es|ed)?|"
+    r"decid(?:es|ed)|intend(?:s|ed)?|plan(?:s|ned)?|tri(?:es|ed)|attempted)"
+    r"\s+(?:to\s+)?(?P<verb>[a-z]+)",
+    re.IGNORECASE)
+
+
+def is_transient_intent(text: str) -> bool:
+    """
+    Is this a record of somebody asking for something, rather than a fact?
+
+    The backstop for the prompt rule above. The prompt is where this is
+    really solved — a digest that stops asserting intent stops producing
+    intent — but a small local model drifts, and one drift costs a
+    permanent memory. This is deterministic and cheap.
+
+    Two shapes, judged differently:
+
+      A *request* is rejected outright. "The user asked for X" records
+      that somebody asked, which stops being true the moment it is
+      answered. Whatever the request produced is a separate sentence, and
+      that one is welcome.
+
+      An *intention* is judged on its verb, because the same frame covers
+      both a chore and a direction. "User wanted to commit the changes"
+      was true for thirty seconds; "User wants to build a local-first
+      memory layer" still holds next month, and `build` is not a chore.
+
+    Deliberately not keyed on memory type: the model labels these
+    inconsistently, and "User wants to fix the issue with ollama" arrived
+    typed as a `problem` while being pure intent. What makes it junk is
+    that the action it names is over.
+    """
+    stripped = text.strip()
+    if _REQUEST.match(stripped):
+        return True
+    match = _INTENT.match(stripped)
+    if not match:
+        return False
+    return match.group("verb").lower() in EPHEMERAL_ACTIONS
 
 
 def _as_entity_type(value) -> EntityType:
@@ -286,6 +379,13 @@ def _is_junk_entity(name: str) -> bool:
     # under a name nobody else will ever write, and it turns up in
     # expansions as a wall of text that says nothing.
     if stripped.startswith(("/", "~/")) or stripped.count("/") >= 3:
+        return True
+    # A markdown heading or a sentence fragment scraped out of a document.
+    # A node has a name; "# MemoOS — Build Instructions for Claude Code"
+    # is a line of a file, and it is unmatchable and unreadable as a node.
+    if stripped.startswith(("#", "-", "*", "`")) or len(stripped) > 48:
+        return True
+    if len(stripped.split()) > 5:
         return True
     # A date is when something happened, not a thing it happened to. As a
     # node it connects every memory made that day to every other one.
@@ -429,6 +529,13 @@ def extract_memories(text: str, *, model: Optional[str] = None,
         # something nobody asked about ("22 files are involved"). They also
         # crowd out real memories, because they are recent and they rank.
         if _is_scaffolding(memory_text):
+            continue
+
+        # A request is not a memory. See `is_transient_intent`: this is
+        # the single biggest source of junk in a terminal store, because
+        # every imported prompt is literally somebody asking for
+        # something.
+        if is_transient_intent(memory_text):
             continue
 
         key = memory_text.lower()

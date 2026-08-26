@@ -11,6 +11,7 @@ back when you open a new terminal in the same project.
     memoos start          ollama + the dashboard, from anywhere
     memoos recall         what was I doing here?
     memoos context TASK   what an agent should know before starting
+    memoos signals        what has gone wrong here before, and what fixed it
     memoos trace ID       where a memory came from
     memoos distill        fold this session into memory
     memoos ingest FILE    teach it about you or the project
@@ -205,6 +206,8 @@ def cmd_context(args) -> int:
                  "confidence": h.memory.confidence}
                 for h in result["results"]
             ],
+            # Past signals, handed over rather than acted on.
+            "signals": [e.as_dict() for e in result.get("signals", [])],
         }, indent=2))
         return 0 if result["results"] else 1
 
@@ -225,6 +228,45 @@ def cmd_context(args) -> int:
         print(f"  {line}" if line else "")
     if not args.quiet:
         print(dim("\n  hand this to your agent — memoos stops here"))
+    print()
+    return 0
+
+
+def cmd_signals(args) -> int:
+    """
+    What has gone wrong in this project, and what fixed it.
+
+    Reported, not acted on. Nothing here retires a memory or reorders a
+    ranking — deciding what to do about a known failure needs to know
+    what you are trying to do, and that is not something a memory layer
+    can see.
+    """
+    from memoos_core.terminal import TerminalMemory
+
+    container = args.container or container_for()
+    episodes = TerminalMemory(container=container).memo.signals(limit=args.limit)
+    if not episodes:
+        print(dim(f"\n  nothing has gone wrong in {container} yet — "
+                  f"or nothing was distilled as a problem\n"))
+        return 0
+
+    unresolved = [e for e in episodes if not e.resolved]
+    resolved = [e for e in episodes if e.resolved]
+
+    if unresolved:
+        rule(f"{container} · open problems")
+        for episode in unresolved:
+            print(f"  {yellow('!')} {episode.problem.text}")
+            print(f"    {dim(episode.problem.id)}")
+
+    if resolved and not args.open_only:
+        rule("known failures, and what fixed them")
+        for episode in resolved:
+            print(f"  {red('✗')} {episode.problem.text}")
+            for solution in episode.solutions:
+                print(f"    {green('↳')} {solution.text}")
+            if episode.shared:
+                print(f"    {dim('both mention: ' + ', '.join(episode.shared))}")
     print()
     return 0
 
@@ -785,6 +827,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="keep memories whose validity window has closed")
     p.add_argument("--quiet", action="store_true", help="the block on its own")
     p.set_defaults(func=cmd_context)
+
+    p = subs.add_parser("signals", help="what has gone wrong here before")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--open", dest="open_only", action="store_true",
+                   help="only problems with no recorded fix")
+    p.set_defaults(func=cmd_signals)
 
     p = subs.add_parser("trace", help="where a memory came from")
     p.add_argument("memory_id")
