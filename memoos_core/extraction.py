@@ -257,8 +257,20 @@ _SCAFFOLDING = re.compile(
 )
 
 
+# A markdown heading, list bullet or fence swallowed into the middle of
+# a sentence. `_is_junk_entity` already refuses these as node names, but
+# the same string reached the memory *text* untouched and produced "The
+# project uses # MemoOS — Build Instructions for Claude Code as its build
+# instructions." The model is describing the shape of a file it read
+# rather than anything the project is or does.
+_MARKUP_IN_TEXT = re.compile(r"(?:^|\s)(?:#{1,6}\s|```|\|\s*-{2,})")
+
+
 def _is_scaffolding(text: str) -> bool:
-    return bool(_SCAFFOLDING.match(text.strip()))
+    stripped = text.strip()
+    if _SCAFFOLDING.match(stripped):
+        return True
+    return bool(_MARKUP_IN_TEXT.search(stripped))
 
 
 # Verbs naming an action that is finished by the time anyone reads the

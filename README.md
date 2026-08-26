@@ -468,13 +468,13 @@ nothing talks back.
 python test_memoos.py
 ```
 
-155 assertions against a scratch data directory — it never touches your real
+160 assertions against a scratch data directory — it never touches your real
 store. No Ollama and no extraction model are needed, and that is enforced
 rather than assumed: one of the tests points the client at a dead port and
 checks the write path still completes.
 
 ```
-  155 passed, 0 failed
+  160 passed, 0 failed
 ```
 
 It also runs under `pytest`, and now actually fails there. The assertions

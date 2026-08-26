@@ -760,6 +760,16 @@ def test_a_request_is_not_a_memory() -> None:
     from memoos_core.terminal import build_digest, is_noise
     from memoos_core.journal import CLAUDE
 
+    # Markdown swallowed into a memory's text: the model describing the
+    # shape of a file it read, rather than anything the project is or does.
+    from memoos_core.extraction import _is_scaffolding
+    for text in ("The project uses # MemoOS — Build Instructions as its docs.",
+                 "Files involved: api.py, db.py"):
+        ok(f"scaffolding dropped: {text[:38]}", _is_scaffolding(text))
+    for text in ("The C# codebase uses NuGet.", "Issue #42 was closed.",
+                 "The project uses JWT for authentication."):
+        ok(f"real text kept: {text[:38]}", not _is_scaffolding(text))
+
     for text in ("User wanted to commit the changes.",
                  "The user wanted to run the demo.",
                  "User wants to kill process 22742.",
