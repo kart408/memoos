@@ -377,8 +377,23 @@ JUNK_ENTITY_NAMES = {
 }
 
 
+# `./api.py` and `api.py` are the same file, and `normalise_entity_name`
+# already keys them identically — so the prefix is shell punctuation, not
+# part of the name, both when judging a name and when storing one.
+_RELATIVE_PREFIX = re.compile(r"^\.{1,2}/")
+
+
 def _is_junk_entity(name: str) -> bool:
-    stripped = name.strip().strip("'\"`.,").lower()
+    # Quotes and trailing punctuation are noise; a leading `./` is not.
+    # Stripping them in one pass took the dot with them and turned
+    # `./api.py` into `/api.py`, which the absolute-path rule below then
+    # threw away — so the same file became a node when the model wrote
+    # `api.py` and was silently dropped when it wrote `./api.py`. A
+    # distil whose only named thing was a `./script.sh` produced an
+    # empty graph and no way to see why.
+    stripped = name.strip().strip("'\"`")
+    stripped = _RELATIVE_PREFIX.sub("", stripped)
+    stripped = stripped.strip(".,").lower()
     if not stripped or stripped in JUNK_ENTITY_NAMES:
         return True
     # A bare number is a count, not a thing; a single character is noise.
@@ -423,8 +438,9 @@ def _parse_entities(raw) -> List[ExtractedEntity]:
         if not name or _is_junk_entity(name):
             continue
         # Quoting drifts between calls — 'memoos' and memoos are the same
-        # project, and should not become two nodes.
-        name = name.strip().strip("'\"`")
+        # project, and should not become two nodes. So does the `./`
+        # prefix: the node is the file, not the way one shell spelled it.
+        name = _RELATIVE_PREFIX.sub("", name.strip().strip("'\"`"))
         entities.append(ExtractedEntity(name=name, entity_type=entity_type))
     return entities
 

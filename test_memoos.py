@@ -426,6 +426,19 @@ def test_global_container_reaches_every_command() -> None:
               parser.parse_args(["--container", "elsewhere", command]).container,
               "elsewhere")
 
+    # Memory types were cut to four characters to line the column up,
+    # which prints `[even]` and `[prob]` — not words, and `[pref]` and
+    # `[prob]` differ by one letter at a glance. The column still has to
+    # line up, so the label is padded rather than truncated.
+    from memoos_core.models import MemoryType
+
+    labels = memoos_cli.type_labels([t.value for t in MemoryType])
+    for memory_type, label in zip(MemoryType, labels):
+        ok(f"{memory_type.value} is spelled out", memory_type.value in label)
+    check("every label is the same width", len(set(len(t) for t in labels)), 1)
+    check("an empty column does not blow up",
+          memoos_cli.type_labels([]), [])
+
 
 # ------------------------------------------------------------- pipeline
 
@@ -699,6 +712,27 @@ def test_entity_names_worth_having() -> None:
     for name in ("api.py", "test_auth.py", "PostgreSQL", "Next.js",
                  "src/auth/login.ts", "pyjwt"):
         ok(f"kept: {name}", not _is_junk_entity(name))
+
+    # A `./` prefix is how a shell writes a file in the current
+    # directory, not part of its name. Stripping punctuation and the
+    # leading dot in one pass turned `./api.py` into `/api.py`, which the
+    # absolute-path rule above then dropped — so the same file was a node
+    # when the model wrote `api.py` and vanished when it wrote `./api.py`.
+    # A distil whose only named thing was a `./script.sh` left an empty
+    # graph, and nothing said why.
+    from memoos_core.extraction import _parse_entities
+
+    for name in ("./api.py", "./start_demo.sh", "`./api.py`",
+                 "../lib/util.py", ".env"):
+        ok(f"a relative path is kept: {name}", not _is_junk_entity(name))
+
+    ok("an absolute path still is not", _is_junk_entity("/Users/someone"))
+
+    # And the two spellings have to land on one node, not two.
+    check("the prefix is dropped from the stored name",
+          [e.name for e in _parse_entities([{"name": "./start_demo.sh"},
+                                            {"name": "start_demo.sh"}])],
+          ["start_demo.sh", "start_demo.sh"])
 
 
 @reports
@@ -1030,6 +1064,21 @@ def test_looking_around_is_not_work() -> None:
     for command in ("./start_demo.sh", "git commit -m x", "npm install pyjwt",
                     "pytest", "cat data.json | python load.py"):
         ok(f"real work: {command[:40]}", not is_noise(command))
+
+    # zsh's AUTO_CD: a bare directory path *is* the command, so there is
+    # no command word for NOISE to match. `cd /Users/me` was filtered as
+    # navigation and `/Users/me` was not, and the gap became the memory
+    # "The user ran `/Users/karthikreddy`" plus a graph node for a
+    # directory on one machine.
+    for command in ("/Users/karthikreddy", "~/projects/memoos", "..",
+                    "../memoos", "/usr/local/bin"):
+        ok(f"auto_cd is navigation: {command}", is_noise(command))
+
+    # An extension is what separates going somewhere from running
+    # something, and an argument settles it whatever the path looks like.
+    for command in ("./start_demo.sh", "~/bin/build.sh",
+                    "/usr/bin/python3 script.py"):
+        ok(f"but running a path is work: {command}", not is_noise(command))
 
     # A redirect is what actually says something was written, and it
     # settles the line on its own.
