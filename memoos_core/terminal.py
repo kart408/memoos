@@ -39,6 +39,12 @@ NOISE = {
     "ls", "ll", "la", "cd", "pwd", "clear", "exit", "history", "man",
     "which", "whoami", "date", "top", "htop", "tree", "echo", "printenv",
     "env", "less", "more", "head", "tail", "wc", "source", "export",
+    # Process and session management. Starting, stopping and waiting on
+    # things is how you *operate* a machine, not what you did on it —
+    # `sleep 60` and `kill 23643 && pkill ollama` both became permanent
+    # memories, and `sleep` and `kill` both became graph entities.
+    "sleep", "kill", "pkill", "killall", "jobs", "bg", "fg", "wait",
+    "ps", "uptime", "df", "du", "free", "open", "say", "clear",
 }
 NOISE_PAIRS = {
     ("git", "status"), ("git", "log"), ("git", "diff"), ("git", "branch"),
@@ -237,13 +243,25 @@ def build_digest(container: str, events: List[Dict[str, Any]]) -> str:
 
         if kind == CLAUDE:
             text = _one_line(text)
-            # Deliberately not "asked Claude Code to ...". Naming the tool
-            # in every line makes it an entity in every memory, and an
-            # entity attached to everything is attached to nothing useful
-            # — the graph collapses into a star around a node that tells
-            # you no more than the project name already did. What is worth
-            # remembering is the request, not who it was addressed to.
-            say(f'The user wanted to "{text.rstrip(".")}"')
+            # Marked as a request, not stated as a fact.
+            #
+            # This line used to read `The user wanted to "..."`, and it
+            # was the single biggest source of junk in the store: every
+            # prompt became an assertion that the user *wanted* something,
+            # and the extractor faithfully recorded the wanting. Thirty of
+            # fifty-one memories in a real store were things like "User
+            # wanted to commit the changes" — true for thirty seconds,
+            # stored forever, and ranked against facts that still hold.
+            #
+            # A request is context for reading the commands that follow,
+            # never a memory in itself. The prompt is told to treat this
+            # prefix that way; naming it explicitly is what makes that
+            # instruction land.
+            #
+            # Still not "asked Claude Code to ...": naming the tool in
+            # every line makes it an entity in every memory, and an entity
+            # attached to everything is attached to nothing.
+            say(f'The user asked for: {text.rstrip(".")}')
         elif kind == NOTE:
             say(f"The user noted that {text[0].lower()}{text[1:]}"
                 if text[:1].isupper() else f"The user noted that {text}")

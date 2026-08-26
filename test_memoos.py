@@ -691,12 +691,177 @@ def test_entity_names_worth_having() -> None:
     from memoos_core.extraction import _is_junk_entity
 
     for name in ("/Users/someone/proj/venv/bin/activate", "~/.zshrc",
-                 "a/b/c/d.py", "tech", "user", "2026-08-26", "7", "x"):
+                 "a/b/c/d.py", "tech", "user", "2026-08-26", "7", "x",
+                 "# MemoOS \u2014 Build Instructions for Claude Code",
+                 "- a bulleted line scraped out of a document"):
         ok(f"dropped: {name}", _is_junk_entity(name))
 
     for name in ("api.py", "test_auth.py", "PostgreSQL", "Next.js",
                  "src/auth/login.ts", "pyjwt"):
         ok(f"kept: {name}", not _is_junk_entity(name))
+
+
+@reports
+def test_relation_only_entities_are_linked() -> None:
+    section("graph links")
+
+    # An entity named only inside a relation triple was created and
+    # counted, but never linked to the memory — so it claimed a mention
+    # it could not show, and graph expansion could never reach it, since
+    # expansion travels through memory_entities.
+    from memoos_core import MemoOS
+    from memoos_core.graph import USER_NORM_NAME
+    from memoos_core.models import (ExtractedEntity, ExtractedMemory,
+                                    ExtractedRelation, Memory)
+
+    memo = MemoOS(container="links")
+    stored = Memory(container="links", text="The master branch was renamed to main.")
+    memo.db.insert_memory(stored)
+    memo.graph.attach(stored, ExtractedMemory(
+        text=stored.text,
+        entities=[ExtractedEntity(name="master")],           # listed
+        relations=[ExtractedRelation(subject="master",
+                                     predicate="renamed_to",
+                                     object="main"),         # `main` is not
+                   ExtractedRelation(subject="User",
+                                     predicate="renamed",
+                                     object="master")]))
+
+    linked = memo.db.entity_ids_for_memories([stored.id])[stored.id]
+    names = {e.name for e in memo.db.get_entities(linked).values()}
+    ok("the listed entity is linked", "master" in names)
+    ok("and so is the one only a relation named", "main" in names)
+
+    for entity in memo.db.list_entities("links", limit=50):
+        if entity.norm_name == USER_NORM_NAME:
+            # The reserved node may appear in relations but must never be
+            # linked: linking it would attach it to every memory in the
+            # store and collapse expansion into a star.
+            ok("the reserved user node stays unlinked",
+               entity.id not in linked)
+            continue
+        actual = len(memo.db.memories_for_entities("links", [entity.id], limit=99))
+        check(f"{entity.name}: count matches its links",
+              entity.mention_count, actual)
+    memo.close()
+
+
+@reports
+def test_a_request_is_not_a_memory() -> None:
+    section("dumping ground")
+
+    # The single biggest source of junk in a real terminal store: every
+    # imported Claude prompt is literally somebody asking for something,
+    # and the digest used to assert it as fact. 38 of 51 memories in the
+    # shipped store were records of a request — "User wanted to commit
+    # the changes", true for thirty seconds, stored forever, and ranked
+    # against facts that still hold.
+    from memoos_core.extraction import is_transient_intent
+    from memoos_core.terminal import build_digest, is_noise
+    from memoos_core.journal import CLAUDE
+
+    for text in ("User wanted to commit the changes.",
+                 "The user wanted to run the demo.",
+                 "User wants to kill process 22742.",
+                 "The user decided to rename 'master' branch to 'main'.",
+                 "The user asked for cleaning up unnecessary files.",
+                 "The user asked for killing process ID 22742.",
+                 "User wants to fix the issue with ollama."):
+        ok(f"dropped: {text[:44]}", is_transient_intent(text))
+
+    # A lasting aim shares the frame but not the fate, and an outcome is
+    # always welcome — that is the sentence worth keeping.
+    for text in ("User wants to build a local-first memory layer.",
+                 "The project uses JWT for authentication.",
+                 "The master branch was renamed to main.",
+                 "Editing api.py made the authentication tests pass.",
+                 "User prefers TypeScript."):
+        ok(f"kept: {text[:44]}", not is_transient_intent(text))
+
+    # The digest is where this is really fixed: it no longer asserts that
+    # the user wanted anything, so the extractor has nothing to record.
+    digest = build_digest("proj", [{"kind": CLAUDE, "text": "Convert auth to JWT"}])
+    ok("the digest marks a prompt as a request", "asked for" in digest)
+    ok("and no longer asserts wanting", "wanted to" not in digest)
+
+    # Operating a machine is not working on a project.
+    for command in ("sleep 60", "kill 23643 && pkill ollama", "ps aux"):
+        ok(f"noise: {command}", is_noise(command))
+    for command in ("git commit -m x", "npm install pyjwt", "pytest"):
+        ok(f"real work: {command}", not is_noise(command))
+
+
+@reports
+def test_past_signals_are_surfaced_not_acted_on() -> None:
+    section("signals")
+
+    # A session is mostly things breaking and then being made to work,
+    # and that arc is the most valuable thing in the store. Filed as
+    # loose facts the two halves sit in separate rows with nothing saying
+    # they are one story.
+    from memoos_core import MemoOS, signals
+    from memoos_core.models import (Document, ExtractedEntity,
+                                    ExtractedMemory, Memory, MemoryType)
+
+    memo = MemoOS(container="episodes")
+    document = Document(container="episodes", source="terminal")
+    memo.db.insert_document(document)
+
+    def remember(text, kind, entity):
+        stored = Memory(container="episodes", text=text, memory_type=kind,
+                        document_id=document.id)
+        memo.db.insert_memory(stored)
+        memo.vectors.add_one(stored.id, stored.text)
+        memo.graph.attach(stored, ExtractedMemory(
+            text=text, memory_type=kind,
+            entities=[ExtractedEntity(name=entity)]))
+        return stored
+
+    # The fix lives somewhere other than the thing that broke, which is
+    # the ordinary case and the one an entity-overlap rule alone misses.
+    problem = remember("The tests in test_auth.py were failing.",
+                       MemoryType.PROBLEM, "test_auth.py")
+    remember("Editing api.py made the authentication tests pass.",
+             MemoryType.SOLUTION, "api.py")
+    orphan = remember("The deploy step times out on Vercel.",
+                      MemoryType.PROBLEM, "Vercel")
+
+    found = {e.problem.id: e for e in memo.signals()}
+    check("both problems are reported", len(found), 2)
+    ok("the pair is matched across different files",
+       found[problem.id].resolved)
+    check("with the fix attached",
+          found[problem.id].solutions[0].text,
+          "Editing api.py made the authentication tests pass.")
+    ok("a problem with no fix reads as open", not found[orphan.id].resolved)
+
+    # Open problems first: the thing least likely to be written down
+    # anywhere else is the thing worth leading with.
+    ordered = memo.signals()
+    ok("unresolved leads", not ordered[0].resolved)
+
+    # Surfaced, never acted on. Nothing here may retire a memory or
+    # reorder a ranking — deciding what to do about a known failure needs
+    # to know the task, and a memory layer cannot see it.
+    before = [m.id for m in memo.all(limit=50)]
+    ranked_before = [r.memory.id for r in
+                     memo.retriever.search("auth", top_k=5, touch=False)]
+    memo.signals()
+    check("no memory was retired", [m.id for m in memo.all(limit=50)], before)
+    check("no ranking was changed",
+          [r.memory.id for r in memo.retriever.search("auth", top_k=5, touch=False)],
+          ranked_before)
+
+    # And they reach the agent through the handover.
+    block = memo.context_for("touching the auth code", top_k=5)["context"]
+    ok("the block carries the signals", "what fixed them" in block
+       or "Open problems" in block)
+    ok("under a heading of their own, not mixed in with the facts",
+       "Project: episodes" in block)
+
+    rendered = signals.render(memo.signals(), unresolved_only=True)
+    ok("unresolved_only drops the solved ones", "\u21b3" not in rendered)
+    memo.close()
 
 
 def main() -> int:
@@ -713,7 +878,10 @@ def main() -> int:
                  test_context_block_is_the_handover,
                  test_memory_traces_back_to_its_source,
                  test_writes_survive_an_unreachable_model,
-                 test_entity_names_worth_having):
+                 test_entity_names_worth_having,
+                 test_a_request_is_not_a_memory,
+                 test_past_signals_are_surfaced_not_acted_on,
+                 test_relation_only_entities_are_linked):
         try:
             test()
         except AssertionError:

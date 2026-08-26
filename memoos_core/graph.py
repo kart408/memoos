@@ -95,21 +95,46 @@ class MemoryGraph:
             entities.append(entity)
             by_norm[entity.norm_name] = entity
 
+        # Relations are attached *before* the memory is linked, because
+        # resolving a triple can bring a node into existence — the model
+        # names something in a relation that it never listed as an entity.
+        relations, resolved = self._attach_relations(memory, extracted, by_norm)
+
+        # Those nodes are mentioned by this memory just as much as the
+        # listed ones are. Linking happened first and only covered the
+        # listed ones, so a relation-only entity got a mention count of 1
+        # and no mentions to back it up — inflating the count, and leaving
+        # a node graph expansion could never reach, since expansion
+        # travels through `memory_entities`.
+        known = {e.id for e in entities}
+        for entity in resolved:
+            # The reserved user node can appear in relations but is never
+            # linked to a memory: linking it would attach it to every
+            # memory in the store and collapse expansion into a star.
+            if entity.norm_name == USER_NORM_NAME or entity.id in known:
+                continue
+            known.add(entity.id)
+            entities.append(entity)
+
         if entities:
             self.db.link_memory_entities(memory.id, [e.id for e in entities])
 
-        relations = self._attach_relations(memory, extracted, by_norm)
         return entities, relations
 
     def _attach_relations(self, memory: Memory, extracted: ExtractedMemory,
-                          by_norm: Dict[str, Entity]) -> List[Relation]:
+                          by_norm: Dict[str, Entity]
+                          ) -> Tuple[List[Relation], List[Entity]]:
+        """Persist a memory's relations, and report every node they touched."""
         relations: List[Relation] = []
+        touched: Dict[str, Entity] = {}
 
         for candidate in extracted.relations:
             subject = self._resolve(candidate.subject, by_norm)
             obj = self._resolve(candidate.object, by_norm)
             if subject is None or obj is None or subject.id == obj.id:
                 continue
+            touched[subject.id] = subject
+            touched[obj.id] = obj
             relations.append(self.db.insert_relation(Relation(
                 container=self.container,
                 subject_id=subject.id,
@@ -119,7 +144,7 @@ class MemoryGraph:
                 confidence=extracted.confidence,
             )))
 
-        return relations
+        return relations, list(touched.values())
 
     def _resolve(self, name: str, by_norm: Dict[str, Entity]) -> Optional[Entity]:
         """
