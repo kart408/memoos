@@ -34,7 +34,7 @@ from .models import (
     MemoryType,
 )
 from .pipeline import IngestionPipeline
-from .retrieval import Retriever
+from .retrieval import Retriever, in_scope
 from .vectors import VectorIndex
 from . import signals
 
@@ -206,7 +206,7 @@ class MemoOS:
 
     def context_for(self, task: str, *, top_k: Optional[int] = None,
                     include_stale: bool = False, touch: bool = False,
-                    with_signals: bool = True) -> Dict:
+                    with_signals: bool = True, gate: bool = True) -> Dict:
         """
         The whole read path, and the last thing MemoOS does.
 
@@ -228,20 +228,39 @@ class MemoOS:
         `include_stale` keeps active memories whose validity window has
         closed. Superseded ones are not reachable here by design — see
         `history()` for those.
+
+        `gate` applies the calibrated relevance bars, so a question this
+        container knows nothing about comes back empty instead of coming
+        back with its three least-bad guesses. Turn it off to see what
+        search would have said.
         """
         wanted = top_k if top_k is not None else config.CONTEXT_TOP_K
         plan = self.retriever.plan_for(task)
         results = self.retriever.search(task, top_k=wanted, touch=touch,
                                         include_stale=include_stale, plan=plan)
 
+        # The handover needs an "I don't know about that" state, and
+        # search does not have one — it returns its nearest neighbours
+        # however distant. Fine for a caller that can see the scores;
+        # not fine for a block that goes into a prompt with the numbers
+        # stripped off. Asked who won the world cup, this store offered
+        # three memories about itself at cosine 0.49.
+        if gate:
+            results = in_scope(results, query=task)
+
         # Past signals, scoped to what this task touches. Reported, never
         # acted on: nothing here reorders the results or retires anything.
         # What to do about a known failure is the calling agent's call,
         # because it is the only thing that can see the actual task.
+        #
+        # Nothing relevant means nothing to scope them to. Reporting them
+        # anyway would answer an out-of-scope question with the project's
+        # entire failure history — `episodes_for` with no focus reports
+        # everything, which is right for a fresh terminal and wrong here.
         episodes = signals.episodes_for(
             self.db, self.container,
             memory_ids=[r.memory.id for r in results],
-        ) if with_signals else []
+        ) if (with_signals and results) else []
 
         return {
             "container": self.container,

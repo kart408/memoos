@@ -32,6 +32,7 @@ from .consolidation import strength
 from .db import Database
 from .graph import MemoryGraph
 from .models import MemoryQueryResult, MemoryStatus, MemoryType
+from .text_utils import significant_set
 from .query import QueryPlan, understand
 from .vectors import VectorIndex
 
@@ -52,6 +53,86 @@ def reciprocal_rank_fusion(ranked_lists: Sequence[Sequence[str]],
         for rank, item_id in enumerate(ranked, start=1):
             scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (constant + rank)
     return scores
+
+
+def in_scope(results: Sequence[MemoryQueryResult],
+             query: str = "",
+             corroborated: Optional[float] = None,
+             vector_only: Optional[float] = None) -> List[MemoryQueryResult]:
+    """
+    Drop results the store is not actually confident about.
+
+    Search always returns its best candidates, however poor they are —
+    that is what nearest-neighbour means, and for `search()` it is the
+    right contract, because the caller can see the scores and decide.
+    A context block cannot: it goes into somebody else's prompt stripped
+    of every number, and an agent handed three memories about MemoOS in
+    reply to "who won the world cup" will try to use them. Somewhere
+    between retrieval and the handover there has to be a state that means
+    "I don't know about that", and this is it.
+
+    The bars are `config.RECALL_MIN_SIMILARITY_*`, which were calibrated
+    against measured pairs for exactly this question and have been
+    orphaned since the chat layer that used them was deleted. Nothing is
+    retuned here; this only wires them back up.
+
+    Two of them, because a second retriever agreeing is evidence and buys
+    a lower bar. Compared against raw cosine, never against `score` —
+    RRF encodes *rank*, not similarity, and tops out near 1/(RRF_K + 1),
+    about 0.016. Comparing that to 0.48 is a category error that fails
+    silently: the gate simply never opens.
+    """
+    corroborated_bar = (corroborated if corroborated is not None
+                        else config.RECALL_MIN_SIMILARITY_CORROBORATED)
+    vector_bar = (vector_only if vector_only is not None
+                  else config.RECALL_MIN_SIMILARITY_VECTOR_ONLY)
+
+    kept: List[MemoryQueryResult] = []
+    for result in results:
+        similarity = result.vector_score
+        if similarity is None:
+            # No vector opinion at all: this arrived on a literal token
+            # or a shared entity, which is concrete evidence rather than
+            # a distance. There is no cosine to judge, and judging it by
+            # one it does not have would throw away the half of hybrid
+            # search that exists for rare names and IDs.
+            kept.append(result)
+            continue
+        if similarity >= (_bar_for(result, query, corroborated_bar, vector_bar)):
+            kept.append(result)
+    return kept
+
+
+def _bar_for(result: MemoryQueryResult, query: str,
+             corroborated_bar: float, vector_bar: float) -> float:
+    """
+    Which bar this result has to clear, and why it might get the easier one.
+
+    A second retriever agreeing is evidence, and evidence buys a lower
+    bar. But it only counts when the agreement is *independent*, and
+    query expansion can manufacture agreement that is not.
+
+    Asked "who is my sister", expansion probed the store, harvested
+    `main` and `master` off the nearest memories, and searched for
+    "who is my sister main master". The keyword retriever duly matched
+    "The master branch was renamed to main" — on two words the user never
+    typed and the vector search had just invented. That counted as
+    corroboration, halved the bar from 0.48 to 0.40, and let a memory
+    through at cosine 0.428. The retriever was not agreeing; it was
+    echoing.
+
+    So corroboration has to rest on the user's own words: the result must
+    share a content word with the query as asked. With no query to check
+    against, agreement is taken at face value, which is the old behaviour.
+    """
+    if not any(source != "vector" for source in result.matched_by):
+        return vector_bar
+    asked = significant_set(query)
+    if not asked:
+        return corroborated_bar
+    if asked & significant_set(result.memory.text):
+        return corroborated_bar
+    return vector_bar
 
 
 class Retriever:
