@@ -511,6 +511,9 @@ class TerminalMemory:
             "summary": result.summary,
             "chunks_total": result.chunks_total,
             "chunks_failed": result.chunks_failed,
+            "candidates": result.candidates,
+            "rejected": result.rejected,
+            "rejected_summary": result.rejected_summary,
             "retained": 0 if result.complete else len(events),
         }
 
@@ -532,7 +535,9 @@ class TerminalMemory:
             text, title=os.path.basename(resolved), uri=resolved, source="kb"
         )
         return {"path": resolved, "created": result.created,
-                "entities": result.entities, "summary": result.summary}
+                "entities": result.entities, "summary": result.summary,
+                "candidates": result.candidates,
+                "rejected_summary": result.rejected_summary}
 
     # ------------------------------------------------------------- read
 

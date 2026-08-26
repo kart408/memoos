@@ -143,6 +143,30 @@ def entity_names(entities: Sequence) -> List[str]:
     return list(seen.values())
 
 
+def rejection_note(result: Dict) -> str:
+    """
+    What extraction's guards threw away, or "" if they threw away nothing.
+
+    Zero memories has two unrelated causes. The model found nothing worth
+    saying, which is what an uneventful session looks like and is fine —
+    or it said things and every one was rejected here, which means the
+    prompt and its own validator disagree and somebody has to look. Both
+    printed the same line, so the second was invisible: a guard checking
+    for the literal word "user" silently dropped four of the extraction
+    prompt's own worked examples, and nothing anywhere said a candidate
+    had ever existed.
+    """
+    candidates = result.get("candidates", 0)
+    reasons = result.get("rejected_summary", "")
+    if not candidates or not reasons:
+        return ""
+    kept = len(result.get("created", []))
+    if kept:
+        return dim(f"  {candidates} candidates, {kept} kept — dropped: {reasons}")
+    return (yellow(f"  {candidates} candidates, none kept") +
+            dim(f" — {reasons}"))
+
+
 def cmd_recall(args) -> int:
     """
     What this project remembers.
@@ -437,7 +461,8 @@ def _distill(args) -> int:
 
     if not result["created"]:
         if not failed:
-            print(dim(f"  {result.get('skipped', 'nothing to do')} "
+            print(rejection_note(result) or
+                  dim(f"  {result.get('skipped', 'nothing to do')} "
                       f"({result['distilled']} events)"))
         return 1 if failed else 0
 
@@ -449,6 +474,9 @@ def _distill(args) -> int:
     names = entity_names(result.get("entities", []))
     if names:
         print(f"\n  entities: {', '.join(names)}")
+    note = rejection_note(result)
+    if note:
+        print(note)
     print()
     return 0
 
@@ -465,6 +493,9 @@ def cmd_ingest(args) -> int:
         rule(f"{os.path.basename(result['path'])} → {memory.container}")
         for m in result["created"]:
             print(f"  {green('+')} {m.text}")
+        note = rejection_note(result)
+        if note:
+            print(note)
         print(dim(f"  {result['summary']}"))
     print()
     return 0

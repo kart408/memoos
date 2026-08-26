@@ -855,6 +855,78 @@ def test_a_request_is_not_a_memory() -> None:
     for command in ("git commit -m x", "npm install pyjwt", "pytest"):
         ok(f"real work: {command}", not is_noise(command))
 
+    # --- the prompt and its own validator have to agree ---
+    #
+    # The extraction prompt names two subjects, "User" for the person and
+    # "The project" for the codebase, and the guard under it checked for
+    # the literal word "user" — so four of the prompt's own worked
+    # examples failed it. Silently: an empty extraction looked exactly
+    # like a session with nothing in it.
+    from memoos_core.extraction import names_known_subject
+
+    for text in ("User moved to Delhi.",
+                 "User switched from PyTorch to JAX.",
+                 "The project uses JWT for authentication.",
+                 "The project uses the pyjwt library."):
+        ok(f"a documented subject is kept: {text[:34]}", names_known_subject(text))
+
+    for text in ("The message mentions a script.",
+                 "This text describes an installation."):
+        ok(f"narration is dropped: {text[:34]}", not names_known_subject(text))
+
+    # A known, deliberate gap: these name neither subject, so they still
+    # fail. Asserted so the gap is a decision on the record rather than a
+    # surprise the next time somebody reads the prompt.
+    for text in ("The authentication tests in test_auth.py were failing.",
+                 "Editing api.py made the authentication tests pass."):
+        ok(f"still dropped, knowingly: {text[:34]}", not names_known_subject(text))
+
+    # --- an empty extraction has to say which kind of empty it is ---
+    from memoos_core import extraction
+
+    real = extraction.generate_json
+    extraction.generate_json = lambda *a, **k: {"memories": [
+        {"text": "The project uses JWT for authentication.", "type": "fact"},
+        {"text": "The message mentions a script.", "type": "fact"},
+        {"text": "User wanted to commit the changes.", "type": "event"},
+    ]}
+    try:
+        report = {}
+        kept = extraction.extract_memories(
+            "The project uses JWT for authentication and commits were made.",
+            subject_scoped=True, check_grounding=False, report=report)
+        check("only the grounded, subject-named one survives", len(kept), 1)
+        check("every candidate is counted", report["candidates"], 3)
+        check("and the count that survived", report["kept"], 1)
+        check("narration is attributed to the subject guard",
+              report.get("subject"), 1)
+        check("a request is attributed to the intent guard",
+              report.get("intent"), 1)
+
+        # Nothing rejected must stay quiet, or the note becomes noise on
+        # every healthy distil.
+        extraction.generate_json = lambda *a, **k: {"memories": []}
+        quiet = {}
+        extraction.extract_memories("nothing here", subject_scoped=True,
+                                    report=quiet)
+        check("a genuinely silent model reports no candidates",
+              quiet["candidates"], 0)
+    finally:
+        extraction.generate_json = real
+
+    # The CLI turns that into a line only when there is something to say.
+    import memoos_cli
+
+    check("silence stays silent",
+          memoos_cli.rejection_note({"candidates": 0, "rejected_summary": "",
+                                     "created": []}), "")
+    ok("all-rejected is a warning",
+       "none kept" in memoos_cli.rejection_note(
+           {"candidates": 2, "rejected_summary": "subject \u00d72", "created": []}))
+    ok("partly-rejected still says so",
+       "1 kept" in memoos_cli.rejection_note(
+           {"candidates": 2, "rejected_summary": "subject \u00d71", "created": [1]}))
+
 
 @reports
 def test_past_signals_are_surfaced_not_acted_on() -> None:

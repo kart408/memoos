@@ -84,9 +84,18 @@ class IngestionPipeline:
             result.chunks_total = len(chunks)
             for chunk_id, chunk in zip(chunk_ids, chunks):
                 try:
+                    # Per chunk, because a document that yields nothing
+                    # needs to say whether the model was silent or its
+                    # candidates were all rejected — those want opposite
+                    # responses, and they look identical from out here.
+                    report: Dict[str, int] = {}
                     for item in extract_memories(chunk, subject_scoped=subject_scoped,
-                                                 strict=True):
+                                                 strict=True, report=report):
                         extracted.append((chunk_id, item))
+                    result.candidates += report.pop("candidates", 0)
+                    report.pop("kept", None)
+                    for reason, count in report.items():
+                        result.rejected[reason] = result.rejected.get(reason, 0) + count
                 except Exception:
                     # One unreadable chunk shouldn't sink the document — but
                     # it must be counted. Swallowing it made a timed-out

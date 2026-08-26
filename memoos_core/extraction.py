@@ -19,7 +19,7 @@ So three things happen on every extraction:
 """
 
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import config, text_utils
 from .llm import generate_json
@@ -196,16 +196,31 @@ def is_pure_question(text: str) -> bool:
     return True
 
 
-def mentions_user(text: str) -> bool:
-    """
-    Does this memory actually say something about the user?
+# The subjects the extraction prompt mandates, in the words it mandates
+# them: "User" for the person, "The project" for the codebase.
+_KNOWN_SUBJECT = re.compile(r"\buser\b|^\s*the project\b", re.IGNORECASE)
 
-    Extraction is instructed to write every memory as a third-person
-    statement about "User". Anything that comes back without a user
-    reference is the model describing the *message* rather than
-    recording a fact from it.
+
+def names_known_subject(text: str) -> bool:
     """
-    return re.search(r"\buser\b", text, re.IGNORECASE) is not None
+    Does this memory name one of the subjects extraction asks for?
+
+    Anything that names neither is the model describing the *message*
+    rather than recording a fact from it.
+
+    Both subjects, not just "User". The prompt has named two since it
+    grew a project voice — "The project uses JWT for authentication" is
+    exactly what it asks for — but this checked for `\buser\b` alone,
+    so four of the prompt's own worked examples failed the validator
+    sitting under them, and failed it silently.
+
+    Two of those four still fail: "The authentication tests in
+    test_auth.py were failing" names neither subject. That is a known
+    gap, kept deliberately narrow — this guard is the confabulation net
+    on the `remember()` path, and widening it to any sentence about
+    anything is what it exists to prevent.
+    """
+    return _KNOWN_SUBJECT.search(text) is not None
 
 
 def is_grounded(memory_text: str, source_text: str, min_ratio: float = 0.34) -> bool:
@@ -482,7 +497,8 @@ class ExtractionUnavailable(RuntimeError):
 def extract_memories(text: str, *, model: Optional[str] = None,
                      check_grounding: bool = True,
                      subject_scoped: bool = True,
-                     strict: bool = False) -> List[ExtractedMemory]:
+                     strict: bool = False,
+                     report: Optional[Dict[str, int]] = None) -> List[ExtractedMemory]:
     """
     Extract structured memories from a piece of text.
 
@@ -500,6 +516,14 @@ def extract_memories(text: str, *, model: Optional[str] = None,
     *call itself* failed. Callers that will mark their source as
     processed afterwards want this: without it they cannot tell a chunk
     that said nothing from a chunk they never managed to read.
+
+    Pass a `report` dict to find out what the guards did. It comes back
+    with `candidates` and a count per reason things were dropped. Empty
+    output has two very different causes — the model found nothing to
+    say, or it said things that were all rejected here — and without
+    this they are indistinguishable from the outside, which is how a
+    prompt and its own validator disagreed about four of the prompt's
+    worked examples without anything ever saying so.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -536,18 +560,27 @@ def extract_memories(text: str, *, model: Optional[str] = None,
     extracted: List[ExtractedMemory] = []
     seen: set[str] = set()
 
+    tally = report if report is not None else {}
+    tally["candidates"] = len(raw_memories)
+
+    def dropped(reason: str) -> None:
+        tally[reason] = tally.get(reason, 0) + 1
+
     for item in raw_memories:
         if isinstance(item, str):
             item = {"text": item}
         if not isinstance(item, dict):
+            dropped("malformed")
             continue
 
         memory_text = str(item.get("text", "")).strip()
         if len(memory_text) < 4:
+            dropped("malformed")
             continue
 
         # A model that echoes the prompt's placeholder is a failed call.
         if memory_text.strip(". ") in {"...", "..", "text"}:
+            dropped("placeholder")
             continue
 
         # A memory has to say something you could act on or be reminded
@@ -556,6 +589,7 @@ def extract_memories(text: str, *, model: Optional[str] = None,
         # something nobody asked about ("22 files are involved"). They also
         # crowd out real memories, because they are recent and they rank.
         if _is_scaffolding(memory_text):
+            dropped("scaffolding")
             continue
 
         # A request is not a memory. See `is_transient_intent`: this is
@@ -563,10 +597,12 @@ def extract_memories(text: str, *, model: Optional[str] = None,
         # every imported prompt is literally somebody asking for
         # something.
         if is_transient_intent(memory_text):
+            dropped("intent")
             continue
 
         key = memory_text.lower()
         if key in seen:
+            dropped("duplicate")
             continue
         seen.add(key)
 
@@ -575,8 +611,10 @@ def extract_memories(text: str, *, model: Optional[str] = None,
         # check catches the model narrating the message instead of
         # recording a fact from it.
         if check_grounding and not is_grounded(memory_text, cleaned):
+            dropped("grounding")
             continue
-        if subject_scoped and not mentions_user(memory_text):
+        if subject_scoped and not names_known_subject(memory_text):
+            dropped("subject")
             continue
 
         extracted.append(ExtractedMemory(
@@ -588,6 +626,7 @@ def extract_memories(text: str, *, model: Optional[str] = None,
             relations=_parse_relations(item.get("relations")),
         ))
 
+    tally["kept"] = len(extracted)
     return extracted
 
 
