@@ -136,6 +136,20 @@ class Journal:
         """The file this container's events live in."""
         return self.path or config.db_path(self.data_dir, container)
 
+    @staticmethod
+    def _key(container: str) -> str:
+        """
+        The one spelling of a container name, used for both file and filter.
+
+        The file is chosen by `safe_container` but the WHERE clause used
+        whatever the caller passed, so a name that normalises — "MyProj",
+        arriving from a hand-typed dashboard URL — wrote rows into
+        myproj.db under a label nothing else ever queries. Two halves of
+        one project, in one file, invisible to each other. Normalising
+        here makes the two agree by construction.
+        """
+        return sanitise_container(container)
+
     def _connect(self, container: str, create: bool = True) -> sqlite3.Connection:
         """
         Open this container's file. `create` is the write/read distinction.
@@ -147,7 +161,15 @@ class Journal:
         leaving one file behind per name anyone ever asked about.
         """
         path = self.path_for(container)
-        if not create and not os.path.exists(path):
+        exists = os.path.exists(path)
+        if not exists:
+            # The file can go away underneath a living process — `memoos
+            # clear` deletes it. Whatever we knew about its schema died
+            # with it, so forget that and let the DDL run again rather
+            # than reconnecting to an empty file and reading tables that
+            # are no longer there.
+            _SCHEMA_APPLIED.discard(path)
+        if not create and not exists:
             conn = sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             conn.executescript(_SCHEMA)
@@ -176,7 +198,7 @@ class Journal:
         if not text:
             return ""
         cwd = cwd or os.getcwd()
-        container = container or container_for(cwd)
+        container = self._key(container) if container else container_for(cwd)
         event_id = str(uuid.uuid4())
         with self._connect(container) as conn:
             conn.execute(
@@ -193,6 +215,7 @@ class Journal:
         """Stamp events as folded into memory. `container` names their file."""
         if not event_ids:
             return
+        container = self._key(container)
         stamp = _now()
         with self._connect(container) as conn:
             conn.executemany(
@@ -202,6 +225,7 @@ class Journal:
 
     def pending_count(self, container: str) -> int:
         """How many events are waiting to be folded into memory."""
+        container = self._key(container)
         with self._connect(container, create=False) as conn:
             return conn.execute(
                 "SELECT COUNT(*) FROM events WHERE container = ? AND distilled_at IS NULL",
@@ -209,6 +233,7 @@ class Journal:
             ).fetchone()[0]
 
     def forget(self, container: str) -> int:
+        container = self._key(container)
         with self._connect(container) as conn:
             cur = conn.execute("DELETE FROM events WHERE container = ?", (container,))
             return cur.rowcount
@@ -218,6 +243,7 @@ class Journal:
     def events(self, container: str, *, session_id: Optional[str] = None,
                kind: Optional[str] = None, undistilled_only: bool = False,
                limit: int = 500) -> List[Dict[str, Any]]:
+        container = self._key(container)
         sql = "SELECT * FROM events WHERE container = ?"
         params: List[Any] = [container]
         if session_id:
@@ -239,6 +265,7 @@ class Journal:
 
     def sessions(self, container: str, limit: int = 20) -> List[Dict[str, Any]]:
         """One row per session: when it ran, how big, what it touched."""
+        container = self._key(container)
         with self._connect(container, create=False) as conn:
             rows = conn.execute(
                 """SELECT session_id,

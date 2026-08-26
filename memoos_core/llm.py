@@ -46,16 +46,24 @@ def _call(prompt: str, *, model: str, system: Optional[str], temperature: float,
     try:
         response = requests.post(_endpoint(), json=payload, timeout=timeout)
         response.raise_for_status()
-    except requests.RequestException as exc:
+        # Inside the try: a 200 whose body is not JSON (a proxy's error
+        # page, a truncated stream) is just as much a failed call as a
+        # refused connection, and callers here catch LLMError.
+        body = response.json()
+    except (requests.RequestException, ValueError) as exc:
         raise LLMError(f"Ollama request failed ({model}): {exc}") from exc
 
-    return response.json().get("response", "").strip()
+    return str(body.get("response", "") if isinstance(body, dict) else "").strip()
 
 
-# Free-text generation lived here, for the chat assistant. Both are gone:
-# MemoOS extracts and retrieves, it does not converse. What remains is
-# JSON mode, which is what the extraction and conflict-judging prompts
-# need — a model used as a parser, not as a speaker.
+# Free-text generation lived here, for a chat assistant. It is gone, and
+# staying gone is a design constraint rather than an omission: MemoOS
+# returns context and stops. The agent holding the conversation — Claude
+# Code, or whatever else asked — is the thing that answers, because it is
+# the only thing that knows what the user is actually trying to do.
+#
+# What remains is JSON mode, which is what the extraction and
+# conflict-judging prompts need: a model used as a parser, not a speaker.
 
 
 # ------------------------------------------------------------ JSON mode
@@ -151,20 +159,37 @@ def generate_json(prompt: str, *, system: Optional[str] = None, temperature: flo
     Returning None rather than raising is deliberate: extraction runs on
     every write, and one unparseable response should degrade that single
     memory's structure, not fail the ingest.
+
+    That has to cover the model being *unreachable*, not just unhelpful.
+    It did not: a refused connection or a timeout raised straight out
+    through `judge_conflict` — which documents the opposite — and killed
+    the whole write. Worst of all in the background distil that runs when
+    a terminal closes, where nobody is watching and the failure surfaces
+    as a session that simply never became memory.
+
+    A transport failure is not retried. A bad parse is worth another go
+    because the model can do better on a second look; a dead socket
+    cannot, and three 180-second timeouts back to back would turn one
+    unreachable model into nine minutes of a background job. Returning
+    None leaves the events pending, which is exactly the state the next
+    `memoos distill` is built to recover from.
     """
     attempts = (retries if retries is not None else config.LLM_JSON_RETRIES) + 1
     active_model = model or config.EXTRACT_MODEL
     current_prompt = prompt
 
     for attempt in range(attempts):
-        raw = _call(
-            current_prompt,
-            model=active_model,
-            system=system,
-            temperature=temperature,
-            json_mode=True,
-            timeout=timeout or config.LLM_TIMEOUT,
-        )
+        try:
+            raw = _call(
+                current_prompt,
+                model=active_model,
+                system=system,
+                temperature=temperature,
+                json_mode=True,
+                timeout=timeout or config.LLM_TIMEOUT,
+            )
+        except LLMError:
+            return None
         parsed = coerce_json(raw)
         if parsed is not None:
             return parsed
@@ -185,10 +210,11 @@ def is_available(model: Optional[str] = None) -> bool:
     try:
         response = requests.get(f"{config.OLLAMA_URL.rstrip('/')}/api/tags", timeout=5)
         response.raise_for_status()
-    except requests.RequestException:
+        tags = response.json()
+    except (requests.RequestException, ValueError):
         return False
     if model is None:
         return True
-    names = {m.get("name", "") for m in response.json().get("models", [])}
+    names = {m.get("name", "") for m in tags.get("models", [])}
     # Ollama reports "mistral:latest"; callers often say "mistral".
     return model in names or f"{model}:latest" in names

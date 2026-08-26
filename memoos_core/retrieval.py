@@ -31,7 +31,8 @@ from . import config
 from .consolidation import strength
 from .db import Database
 from .graph import MemoryGraph
-from .models import Memory, MemoryQueryResult, MemoryStatus, MemoryType
+from .models import MemoryQueryResult, MemoryStatus, MemoryType
+from .query import QueryPlan, understand
 from .vectors import VectorIndex
 
 
@@ -61,24 +62,49 @@ class Retriever:
         self.graph = graph
         self.container = container
 
+    def plan_for(self, query: str, *, expand: Optional[bool] = None) -> QueryPlan:
+        """Stage 9 on its own, for callers that want to show their working."""
+        return understand(query, db=self.db, vectors=self.vectors,
+                          container=self.container, enabled=expand)
+
     def search(self, query: str, top_k: int = 5, *, use_graph: bool = True,
                memory_type: Optional[MemoryType] = None,
                touch: bool = True,
-               min_score: Optional[float] = None) -> List[MemoryQueryResult]:
+               min_score: Optional[float] = None,
+               include_stale: bool = False,
+               expand: Optional[bool] = None,
+               plan: Optional[QueryPlan] = None) -> List[MemoryQueryResult]:
         """
         Hybrid search over this container's active memories.
 
         `touch` records the retrieval as an access, which is what feeds
         reinforcement. Turn it off for introspection or evaluation, so
         looking at the store doesn't change it.
+
+        `include_stale` keeps memories whose validity window has closed
+        but which are still active. It does *not* resurrect superseded
+        ones: supersession un-indexes them, deliberately, so that a fact
+        which stopped being true stops competing for candidate slots.
+        Their history is reachable through `MemoOS.history()`, which
+        walks the supersession chain in SQLite where the rows still live.
+
+        `plan` accepts an already-computed expansion, so a caller that
+        showed the user what it was about to search for does not pay for
+        the probe twice.
         """
         cleaned = query.strip()
         if not cleaned:
             return []
 
+        if plan is None:
+            plan = self.plan_for(cleaned, expand=expand)
+
+        # The question goes to the vector retriever exactly as asked;
+        # only the lexical half gets the expansion. Embedding the padded
+        # text would move the query vector off what was actually asked.
         vector_hits = self.vectors.search(cleaned, top_k=config.VECTOR_CANDIDATES)
         keyword_hits = self.db.keyword_search(
-            self.container, cleaned, limit=config.KEYWORD_CANDIDATES
+            self.container, plan.keyword_text(), limit=config.KEYWORD_CANDIDATES
         )
 
         vector_scores = dict(vector_hits)
@@ -101,7 +127,7 @@ class Retriever:
         return self._rank(
             fused, vector_scores, keyword_scores, graph_entities,
             top_k=top_k, memory_type=memory_type, touch=touch,
-            min_score=min_score,
+            min_score=min_score, include_stale=include_stale,
         )
 
     def _expand(self, fused: Dict[str, float],
@@ -153,7 +179,8 @@ class Retriever:
     def _rank(self, fused: Dict[str, float], vector_scores: Dict[str, float],
               keyword_scores: Dict[str, float], graph_entities: Dict[str, List[str]],
               *, top_k: int, memory_type: Optional[MemoryType],
-              touch: bool, min_score: Optional[float]) -> List[MemoryQueryResult]:
+              touch: bool, min_score: Optional[float],
+              include_stale: bool = False) -> List[MemoryQueryResult]:
         stored = self.db.get_memories(list(fused.keys()))
         now = datetime.now(timezone.utc)
 
@@ -167,6 +194,13 @@ class Retriever:
         for memory_id, fusion_score in fused.items():
             memory = stored.get(memory_id)
             if memory is None or memory.status != MemoryStatus.ACTIVE:
+                continue
+            # Current validity, the last of the reranking signals. A
+            # memory whose window has closed is history, not an answer:
+            # "User's project uses MongoDB" is still true *of last year*,
+            # and returning it for "what database do I use?" is how a
+            # memory system confidently tells you something outdated.
+            if not include_stale and not memory.is_current(now):
                 continue
             if memory_type is not None and memory.memory_type != memory_type:
                 continue

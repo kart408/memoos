@@ -10,6 +10,8 @@ back when you open a new terminal in the same project.
     memoos install        wire it into your shell
     memoos start          ollama + the dashboard, from anywhere
     memoos recall         what was I doing here?
+    memoos context TASK   what an agent should know before starting
+    memoos trace ID       where a memory came from
     memoos distill        fold this session into memory
     memoos ingest FILE    teach it about you or the project
     memoos graph          what it knows, and how it connects
@@ -166,6 +168,106 @@ def cmd_recall(args) -> int:
     return 0
 
 
+def cmd_context(args) -> int:
+    """
+    The handover: what an agent should know before it starts this task.
+
+    Prints the context block and stops. MemoOS does not answer — the
+    agent that asked is the thing that knows what you are trying to do,
+    and this is the part it was missing.
+
+    `--json` for a program on the other end, plain text for a human or
+    for pasting straight into a prompt.
+    """
+    from memoos_core.terminal import TerminalMemory
+
+    container = args.container or container_for()
+    task = " ".join(args.task).strip()
+    if not task:
+        print(yellow("context for what?"), file=sys.stderr)
+        return 1
+
+    result = TerminalMemory(container=container).memo.context_for(
+        task, top_k=args.limit, include_stale=args.include_stale)
+
+    if args.json:
+        print(json.dumps({
+            "container": result["container"],
+            "query": result["query"],
+            "plan": result["plan"],
+            "context": result["context"],
+            "memories": [
+                {"id": h.memory.id, "text": h.memory.text,
+                 "type": h.memory.memory_type.value,
+                 "score": h.score, "matched_by": h.matched_by,
+                 "current": h.memory.is_current(),
+                 "importance": h.memory.importance,
+                 "confidence": h.memory.confidence}
+                for h in result["results"]
+            ],
+        }, indent=2))
+        return 0 if result["results"] else 1
+
+    plan = result["plan"]
+    if plan["concepts"] and not args.quiet:
+        # Showing the expansion matters: it is the one retrieval stage
+        # that rewrites the query, and a search that silently searched
+        # for something else is a search you cannot debug.
+        print(f"\n{dim('searching for')} {', '.join(plan['terms'])}"
+              f"{dim(' + ')}{cyan(', '.join(plan['concepts']))}")
+
+    if not result["results"]:
+        print(dim(f"\n  nothing remembered about that in {container}\n"))
+        return 1
+
+    print()
+    for line in result["context"].splitlines():
+        print(f"  {line}" if line else "")
+    if not args.quiet:
+        print(dim("\n  hand this to your agent — memoos stops here"))
+    print()
+    return 0
+
+
+def cmd_trace(args) -> int:
+    """Follow a memory back to the raw input it was distilled from."""
+    from memoos_core.terminal import TerminalMemory
+
+    container = args.container or container_for()
+    trail = TerminalMemory(container=container).memo.source(args.memory_id)
+    if trail is None:
+        print(yellow(f"no memory {args.memory_id!r} in {container}"), file=sys.stderr)
+        return 1
+
+    memory = trail["memory"]
+    rule(f"{magenta('[' + memory.memory_type.value + ']')} {memory.text}")
+    window = clock(memory.valid_from.isoformat()) if memory.valid_from else "?"
+    until = (clock(memory.valid_until.isoformat())
+             if memory.valid_until else green("current"))
+    print(f"  {dim('valid'):<12} {window} → {until}")
+    print(f"  {dim('confidence'):<12} {memory.confidence:.2f}"
+          f"   {dim('importance')} {memory.importance:.2f}")
+
+    document = trail["document"]
+    if document:
+        print(f"  {dim('from'):<12} {document.title or document.source}"
+              f"{dim(' · ' + (document.uri or document.source))}")
+    if trail["chunk"]:
+        rule("passage the model read")
+        for line in trail["chunk"].splitlines()[:12]:
+            print(f"  {dim(line)}")
+
+    events = trail["events"]
+    if events:
+        rule(f"{len(events)} journalled event(s) behind it")
+        for event in events[:args.limit]:
+            code = event.get("exit_code")
+            flag = red("✗") if code not in (0, None) else green("✓")
+            print(f"  {flag} {clock(event['created_at'])}  {event['text']}")
+    print()
+    return 0
+
+
 def cmd_clear(args) -> int:
     """
     Forget a project entirely, or every project.
@@ -225,7 +327,6 @@ def cmd_clear(args) -> int:
 
 def cmd_distill(args) -> int:
     from memoos_core import autodistill
-    from memoos_core.terminal import TerminalMemory
 
     # Only set when the background logger started this one. Owning the
     # lock for the whole run is what stops a busy session from spawning a
@@ -371,7 +472,7 @@ def cmd_doctor(args) -> int:
         if good:
             mark = green("✓")
         else:
-            mark = yellow("!") if not fatal else "\033[31m✗\033[0m"
+            mark = yellow("!") if not fatal else red("✗")
             if fatal:
                 ok = False
         print(f"  {mark} {label:<26} {dim(detail)}")
@@ -394,7 +495,8 @@ def cmd_doctor(args) -> int:
     line(attached, "attached to this shell",
          os.environ.get("MEMOOS_SESSION", "open a new terminal"), fatal=False)
     line(state["connected"], "recording",
-         "disconnected" if not state["connected"] else "")
+         "" if state["connected"] else "disconnected — run `memoos connect`",
+         fatal=False)
 
     print(f"\n{bold('store')}")
     data_dir = os.path.abspath(config.DATA_DIR)
@@ -433,8 +535,11 @@ def cmd_doctor(args) -> int:
           f"{counts['relations']} relations\n")
 
     if not ok:
-        print(dim("  something above is broken — journalling still works, "
-                  "but closing a terminal will not fold it into memory\n"))
+        print(dim("  something above is broken — closing a terminal will not "
+                  "fold its session into memory\n"))
+    elif not state["connected"]:
+        print(dim("  the chain is intact, but recording is switched off — "
+                  "nothing new is being journalled\n"))
     return 0 if ok else 1
 
 
@@ -671,8 +776,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=8)
     p.set_defaults(func=cmd_recall)
 
+    p = subs.add_parser("context", help="what an agent should know before this task")
+    p.add_argument("task", nargs="+")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable, for an agent on the other end")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--include-stale", action="store_true",
+                   help="keep memories whose validity window has closed")
+    p.add_argument("--quiet", action="store_true", help="the block on its own")
+    p.set_defaults(func=cmd_context)
+
+    p = subs.add_parser("trace", help="where a memory came from")
+    p.add_argument("memory_id")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_trace)
+
     p = subs.add_parser("clear", help="forget a project, or every project")
-    p.add_argument("--container")
+    # No --container here: it is a global option, and redefining it on a
+    # subparser silently overwrites the global value with None. For a
+    # command that deletes files that meant `memoos --container other
+    # clear` erasing the project you were standing in instead.
     p.add_argument("--all", action="store_true", help="every project, not just this one")
     p.add_argument("--yes", action="store_true", help="skip the confirmation")
     p.set_defaults(func=cmd_clear)
@@ -717,7 +840,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_install)
 
     p = subs.add_parser("doctor", help="check every part of the chain")
-    p.add_argument("--container")
     p.set_defaults(func=cmd_doctor)
 
     p = subs.add_parser("files", help="where each user's data is stored")

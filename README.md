@@ -149,6 +149,8 @@ run picks them up), but without this you would never know to look.
 memoos install        wire it into your shell
 memoos recall         what was I doing here?
 memoos recall "why did the auth tests fail"    semantic search
+memoos context TASK   what an agent should know before starting (--json)
+memoos trace ID       follow a memory back to the commands behind it
 memoos distill        fold this session into memory
 memoos ingest FILE    teach it about you or the project
 memoos claude         import Claude Code prompts for this project
@@ -163,6 +165,98 @@ memoos disconnect     stop recording (reading still works)
 memoos status         connected or not, and what is stored
 memoos serve          the dashboard, with the graph drawn
 ```
+
+---
+
+## The handover
+
+`memoos context` is the point of the whole thing. An agent is about to work on
+your project; this is what it was missing.
+
+```console
+$ memoos context "why is the auth test failing?"
+
+searching for auth, test, failing + test_auth.py
+
+  Project: my-app
+
+  • The authentication tests in test_auth.py were failing.
+  • Editing api.py made the authentication tests pass.
+  • User wanted to convert auth to JWT.
+  • User installed the npm package pyjwt.
+
+  hand this to your agent — memoos stops here
+```
+
+The `+ test_auth.py` is stage 9, and it is doing real work. "auth", "test" and
+"failing" are your words; `test_auth.py` was read back out of the graph,
+because a vector probe found the memories the question is *about* and harvested
+the entities hanging off them. BM25 cannot match "how do I deploy?" against
+"deployed on Vercel" — no shared token — so without expansion the keyword half
+of hybrid search abstains on exactly the queries that need it.
+
+Expansion is grounded rather than invented. A thesaurus would add words the
+project has never heard of, and every one is a chance for BM25 to match
+something irrelevant with confidence. Reading concepts out of the store means
+expansion can only ever add terms this project already knows.
+
+`--json` gives an agent the block plus each memory's score, type, validity and
+why it matched.
+
+**MemoOS stops here.** It does not answer. The agent that asked is the only
+thing that knows what you are actually trying to do, and a memory layer that
+also wrote the reply would be guessing at that.
+
+---
+
+## Where a memory came from
+
+Every memory traces back to the commands that produced it. A store you cannot
+audit is a store you cannot trust: the failure that matters is a confidently
+retrieved fact nobody ever stated, and following it back is the only way to
+tell that from a real one.
+
+```console
+$ memoos trace c0a04613-e9e5-4fa2-bf39-0889c9ea80b5
+
+[problem] The authentication tests in test_auth.py were failing.
+  valid        26 Aug 20:41 → current
+  confidence   0.80   importance 0.70
+  from         terminal session — my-app
+
+passage the model read
+  The user wanted to "Convert auth to JWT". The user installed the npm
+  package pyjwt. The user ran the tests in test_auth.py, and it failed
+  with exit code 1. The user edited api.py...
+
+6 journalled event(s) behind it
+  ✓ 26 Aug 20:41  Convert auth to JWT
+  ✓ 26 Aug 20:41  npm install pyjwt
+  ✗ 26 Aug 20:41  pytest test_auth.py
+  ✓ 26 Aug 20:41  vim api.py
+  ✓ 26 Aug 20:41  pytest test_auth.py
+  ✓ 26 Aug 20:41  git commit -m 'switch auth to JWT'
+```
+
+---
+
+## Facts have a lifetime
+
+A memory carries `valid_from` / `valid_until`, which is not the same as when
+its row was written. "The project uses MongoDB" did not become *false* when you
+migrated — it stopped being *current*. Deleting it loses the history; leaving it
+active answers "what database?" with two databases.
+
+Supersession closes the interval in the same statement that retires the row, so
+a crash cannot leave a retired memory still reading as current. Retrieval drops
+what is no longer current; `MemoOS.history()` walks the chain backwards when you
+want to know what a thing used to be.
+
+Distilling a session produces three types a chat log never does — `decision`,
+`problem` and `solution` — because a terminal is mostly a record of things
+going wrong and then going right, and that arc is the most valuable thing in
+it. Filed as `event`, "the tests failed on the import path and moving the
+fixture fixed it" decayed on an event's short half-life and read like trivia.
 
 ---
 
@@ -218,6 +312,7 @@ memoos_core/
 ├── pipeline.py      ingestion: chunk, extract, store, index, connect
 ├── db.py            SQLite: memories, documents, entities, relations, FTS5
 ├── vectors.py       embeddings in that same file, searched with numpy
+├── query.py         question → the terms worth searching for, grounded
 ├── retrieval.py     hybrid search: vector + BM25 + graph expansion, fused
 ├── consolidation.py duplicates, contradictions, supersession, decay
 ├── graph.py         the entity graph
@@ -249,7 +344,18 @@ terminal would stay invisible to the dashboard until it restarted.
 **The journal is the source of truth.** Distillation only marks events as done
 if the model actually read them. If a chunk times out, leaving its events
 pending costs a re-run; marking them done would cost the work itself, silently
-and permanently.
+and permanently. That extends to the model being *unreachable*: a refused
+connection reads as "this chunk was not processed", never as an exception that
+takes the write with it. Distillation runs in the background when a terminal
+closes, which is the worst possible place for a hard failure — nobody is
+watching.
+
+**Schema changes are applied in place.** `CREATE TABLE IF NOT EXISTS` does
+nothing to a table that already exists, so a schema grown a column applies
+cleanly to a fresh file and not at all to the one holding a year of memories.
+`Database._add_missing_columns` runs the `ALTER`s and back-fills; indexes over
+those columns run afterwards, because naming a column that is not there yet
+fails the whole script at open.
 
 ---
 
@@ -291,13 +397,20 @@ nothing talks back.
 python test_memoos.py
 ```
 
-43 assertions against a scratch data directory — it never touches your real
-store. No Ollama and no extraction model are needed: everything it covers is
-storage, routing, isolation and search, none of which involve the LLM.
+118 assertions against a scratch data directory — it never touches your real
+store. No Ollama and no extraction model are needed, and that is enforced
+rather than assumed: one of the tests points the client at a dead port and
+checks the write path still completes.
 
 ```
-  43 passed, 0 failed
+  118 passed, 0 failed
 ```
+
+It also runs under `pytest`, and now actually fails there. The assertions
+record failures and keep going, so one run reports everything that is broken
+rather than only the first thing — but nothing raised, so pytest reported
+"passed" no matter what. Each test is wrapped to print its whole tally and then
+still fail.
 
 It checks that a container name resolves to exactly one file and cannot escape
 the containers directory, that events land in their own tenant's file and
@@ -305,7 +418,12 @@ nowhere else, that *asking* what an unknown project remembers does not create
 it, that search ranks by meaning rather than keyword overlap, that a write from
 one process is visible to another with a warm cache, that a vector from a
 different embedding model is reported and skipped rather than crashing search,
-and that deleting a memory takes its vector with it.
+that deleting a memory takes its vector with it, that a question is expanded
+with concepts the project actually knows and not with somebody's sister, that
+supersession closes a memory's validity window in the same statement that
+retires it, that a store written before those columns existed upgrades in place
+without losing a row, and that a memory can be traced back to the passage and
+the session it came from.
 
 `memoos doctor` is the complement: it checks the running system — hook, store,
 Ollama, model — rather than the code.

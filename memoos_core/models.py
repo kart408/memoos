@@ -41,6 +41,18 @@ class MemoryType(str, Enum):
     GOAL = "goal"                  # something the user intends to do
     RELATIONSHIP = "relationship"  # a link to another person/org
 
+    # The three a terminal produces that a chat log does not.
+    #
+    # A session is mostly a record of things going wrong and then going
+    # right, and that shape is the most valuable thing in it — "the tests
+    # failed on the import path and moving the fixture fixed it" is worth
+    # more six months later than any command in the transcript. Filed as
+    # `event`, it decayed on an event's short half-life and read like
+    # trivia. These three separate the arc:
+    DECISION = "decision"          # a choice made, and what it was over
+    PROBLEM = "problem"            # something that broke or blocked
+    SOLUTION = "solution"          # what actually fixed it
+
 
 class MemoryStatus(str, Enum):
     ACTIVE = "active"          # live and retrievable
@@ -89,6 +101,19 @@ class Memory(BaseModel):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
+    # When the *fact* held, as distinct from when the row was written.
+    #
+    # The two come apart constantly and the difference is the whole point:
+    # "User used MongoDB" is not false, it stopped being current. Deleting
+    # it loses the history; leaving it active answers "what database?"
+    # with two databases. A closed interval says both things at once —
+    # the memory is still there, still traceable, and no longer current.
+    #
+    # valid_from defaults to created_at. valid_until stays None while the
+    # fact holds and is stamped the moment something supersedes it.
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+
     # Reinforcement signals — a memory that keeps getting recalled is a
     # memory that keeps mattering, and should resist decay.
     last_accessed_at: Optional[datetime] = None
@@ -104,6 +129,26 @@ class Memory(BaseModel):
     @property
     def is_active(self) -> bool:
         return self.status == MemoryStatus.ACTIVE
+
+    def is_current(self, now: Optional[datetime] = None) -> bool:
+        """
+        Does this memory describe how things are *now*?
+
+        Status and validity answer different questions. Status is about
+        the row (active, merged away, retired); validity is about the
+        world (this held until March). A memory can be perfectly active
+        and no longer current, which is what makes "what did I use
+        before?" answerable at all.
+        """
+        if self.status != MemoryStatus.ACTIVE:
+            return False
+        if self.valid_until is None:
+            return True
+        moment = now or _now()
+        until = self.valid_until
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return until > moment
 
 
 class Entity(BaseModel):

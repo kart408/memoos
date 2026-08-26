@@ -41,9 +41,20 @@ from .vectors import VectorIndex
 
 
 def format_as_context(results: List[MemoryQueryResult],
-                      include_types: bool = False) -> str:
+                      include_types: bool = False,
+                      project: Optional[str] = None) -> str:
     """
     Render retrieved memories as prompt-ready lines.
+
+    This is the artefact MemoOS exists to produce — the last stage, and
+    the handover point. It goes into somebody else's prompt, so it is
+    written to be read by a model that has never seen this project: named
+    subjects, one fact per line, no scores and no ids.
+
+    The project header earns its line. Dropped into a prompt alongside
+    the user's task, an unlabelled list of facts is ambiguous about what
+    it describes; `Project: my-app` says these are facts about the thing
+    you are being asked to work on.
 
     Split out from `recall_as_context` so a caller holding results from a
     search it already ran can format them without running that search a
@@ -62,8 +73,10 @@ def format_as_context(results: List[MemoryQueryResult],
             continue
         seen.add(key)
         label = f" [{result.memory.memory_type.value}]" if include_types else ""
-        lines.append(f"-{label} {text}")
+        lines.append(f"•{label} {text}")
 
+    if project:
+        return f"Project: {project}\n\n" + "\n".join(lines)
     return "\n".join(lines)
 
 
@@ -74,7 +87,11 @@ class MemoOS:
         # `container` is the name this concept goes by everywhere else;
         # `client_id` is kept as the first positional argument so existing
         # callers keep working.
-        self.container = container or client_id
+        #
+        # Normalised on the way in, because `db_path` normalises too: an
+        # un-normalised name would open one container's file and write
+        # rows into it under a label nothing else queries.
+        self.container = config.safe_container(container or client_id)
         self.persist_path = persist_path or config.DATA_DIR
 
         # One file, this container's own: `Database` and `VectorIndex`
@@ -118,16 +135,21 @@ class MemoOS:
 
     def ingest_document(self, text: str, *, title: Optional[str] = None,
                         uri: Optional[str] = None,
-                        source: str = "document") -> IngestResult:
+                        source: str = "document",
+                        metadata: Optional[Dict] = None) -> IngestResult:
         """
         Ingest reference material rather than something the user said.
 
         Turns off the conversational guards — a policy document contains
         no statements about the user, and applying those checks here
         would reject every fact in it.
+
+        `metadata` rides along on the document row. It is what lets a
+        memory be traced back past its own text to the raw events it was
+        distilled from — see `source()`.
         """
         return self.pipeline.ingest(text, source=source, title=title, uri=uri,
-                                    subject_scoped=False)
+                                    subject_scoped=False, metadata=metadata)
 
     def supersede(self, old_memory_id: str, new_text: str,
                   memory_type: MemoryType = MemoryType.FACT,
@@ -166,7 +188,44 @@ class MemoOS:
         results = self.search(
             query, top_k=top_k if top_k is not None else config.CONTEXT_TOP_K
         )
-        return format_as_context(results, include_types=include_types)
+        return format_as_context(results, include_types=include_types,
+                                 project=self.container)
+
+    def context_for(self, task: str, *, top_k: Optional[int] = None,
+                    include_stale: bool = False, touch: bool = False) -> Dict:
+        """
+        The whole read path, and the last thing MemoOS does.
+
+        Understand the query, retrieve from both sides, drop what is no
+        longer current, rerank, and render what survives as a context
+        block. Then stop. The agent that asked — Claude Code, or anything
+        else — is what answers, because it is the only thing that knows
+        what the user is actually trying to do. A memory layer that also
+        wrote the reply would be guessing at that.
+
+        Returns the block *and* the memories behind it, so a caller can
+        show its working rather than pasting an opaque paragraph into a
+        prompt.
+
+        `touch=False` by default: fetching context is an inspection, and
+        reinforcing whatever came back would let the act of looking
+        reshape the ranking.
+
+        `include_stale` keeps active memories whose validity window has
+        closed. Superseded ones are not reachable here by design — see
+        `history()` for those.
+        """
+        wanted = top_k if top_k is not None else config.CONTEXT_TOP_K
+        plan = self.retriever.plan_for(task)
+        results = self.retriever.search(task, top_k=wanted, touch=touch,
+                                        include_stale=include_stale, plan=plan)
+        return {
+            "container": self.container,
+            "query": task,
+            "plan": plan.as_dict(),
+            "results": results,
+            "context": format_as_context(results, project=self.container),
+        }
 
     def get(self, memory_id: str) -> Optional[Memory]:
         return self.db.get_memory(memory_id)
@@ -196,6 +255,64 @@ class MemoOS:
                 break
             current = self.db.get_memory(current.superseded_by)
         return chain
+
+    def source(self, memory_id: str) -> Optional[Dict]:
+        """
+        Where a memory came from, all the way back to the raw input.
+
+        A memory store you cannot audit is a memory store you cannot
+        trust: the one failure that matters is a confidently-retrieved
+        fact nobody ever stated, and the only way to tell that from a
+        real one is to follow it back. The chain is already in the
+        columns — memory -> chunk -> document — and this walks it.
+
+        For a distilled terminal session the document also carries the
+        ids of the journalled events it was built from, so the trail ends
+        at the actual commands you ran.
+        """
+        memory = self.db.get_memory(memory_id)
+        if memory is None:
+            return None
+
+        chunk = self.db.get_chunk(memory.chunk_id) if memory.chunk_id else None
+        document = (self.db.get_document(memory.document_id)
+                    if memory.document_id else None)
+
+        trail: Dict = {
+            "memory": memory,
+            # The exact passage the model read. Narrower than the whole
+            # document and usually the only part worth reading back.
+            "chunk": chunk["text"] if chunk else None,
+            "document": document,
+            # Memory -> derived_from -> Session. Not a graph edge, because
+            # a session is not a thing memories are *about* — making it an
+            # entity would link every memory from one afternoon to every
+            # other and swamp graph expansion, which is the same mistake
+            # the reserved User node exists to avoid. It is provenance,
+            # and provenance belongs on the trail.
+            "sessions": [],
+            "events": [],
+        }
+
+        if document is None:
+            return trail
+
+        trail["sessions"] = document.metadata.get("session_ids") or []
+
+        event_ids = document.metadata.get("event_ids") or []
+        if event_ids:
+            from .journal import Journal
+            wanted = set(event_ids)
+            journal = Journal(data_dir=self.persist_path)
+            trail["events"] = [
+                event for event in journal.events(self.container,
+                                                  limit=max(len(wanted) * 20, 500))
+                if event["id"] in wanted
+            ]
+            if not trail["sessions"]:
+                trail["sessions"] = sorted(
+                    {e["session_id"] for e in trail["events"]})
+        return trail
 
     # ------------------------------------------------------------ graph
 
@@ -259,4 +376,7 @@ class MemoOS:
         }
 
     def close(self) -> None:
+        # Two connections to the one file, so closing one is closing half
+        # of it — the vector index's stayed open until the process died.
         self.db.close()
+        self.vectors.close()
