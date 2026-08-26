@@ -278,6 +278,19 @@ class IngestResult(BaseModel):
     chunks_total: int = 0
     chunks_failed: int = 0
 
+    # What extraction's guards did with what the model returned. Zero
+    # memories has two unrelated causes — nothing worth saying, or
+    # everything said and all of it rejected — and a caller staring at an
+    # empty result cannot tell them apart without this.
+    candidates: int = 0
+    rejected: Dict[str, int] = Field(default_factory=dict)
+
+    @property
+    def rejected_summary(self) -> str:
+        """Why candidates were dropped, commonest first. Empty if none were."""
+        reasons = sorted(self.rejected.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ", ".join(f"{reason} \u00d7{count}" for reason, count in reasons)
+
     @property
     def complete(self) -> bool:
         """Did every chunk reach the model successfully?"""
