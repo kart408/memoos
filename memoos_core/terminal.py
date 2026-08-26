@@ -123,10 +123,32 @@ NOISE_PAIRS = {
 _FILE_LIKE = re.compile(r"[\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|sh|sql|md|json|ya?ml|toml|html|css)")
 
 
+# zsh's AUTO_CD, where a bare directory path *is* the command. There is
+# no command word for NOISE to match, so `cd /Users/me` was filtered as
+# navigation and `/Users/me` was not — and the difference became the
+# permanent memory "The user ran `/Users/karthikreddy`", plus a graph
+# node for a directory on one machine.
+#
+# An extension is what separates the two cases: `./deploy.sh` and
+# `~/bin/build.sh` are things being run, `~/projects/memoos` and `..`
+# are somewhere being gone to. Anything carrying an argument is work
+# whatever it looks like.
+_BARE_PATH = re.compile(r"^(?:/|~|\.\.)[\w./~-]*$")
+
+
+def _is_navigation(stage_parts: List[str]) -> bool:
+    if len(stage_parts) != 1:
+        return False
+    target = stage_parts[0]
+    return bool(_BARE_PATH.match(target)) and not os.path.splitext(target)[1]
+
+
 def _stage_is_noise(stage: str) -> bool:
     """Is one command in a pipeline pure looking-around?"""
     parts = stage.split()
     if not parts:
+        return True
+    if _is_navigation(parts):
         return True
     head = os.path.basename(parts[0])
     if len(parts) >= 2 and (head, parts[1]) in NOISE_PAIRS:

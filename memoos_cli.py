@@ -71,6 +71,7 @@ import argparse  # noqa: E402
 import threading  # noqa: E402
 import webbrowser  # noqa: E402
 import json  # noqa: E402
+from typing import List, Sequence  # noqa: E402
 
 from memoos_core import quick  # noqa: E402
 from memoos_core.journal import Journal, container_for  # noqa: E402
@@ -106,6 +107,20 @@ def clock(iso: str) -> str:
 
 
 # ---------------------------------------------------------------- commands
+
+
+def type_labels(types: Sequence[str]) -> List[str]:
+    """
+    `[type]` tags for a column, padded to the widest one on screen.
+
+    Padded rather than truncated. Cutting to a fixed four characters
+    lined the column up and printed `[even]` and `[prob]`, which are not
+    words — and `[pref]` and `[prob]` differ by one letter at a glance,
+    which is the opposite of what a type label is for. Padding is applied
+    here, before colour: ANSI codes are invisible but `ljust` counts them.
+    """
+    width = max((len(t) for t in types), default=0) + 2
+    return [("[" + t + "]").ljust(width) for t in types]
 
 
 def cmd_recall(args) -> int:
@@ -145,8 +160,9 @@ def cmd_recall(args) -> int:
 
     if memories:
         rule("Last remembered")
-        for m in memories:
-            print(f"  {magenta('[' + m['memory_type'][:4] + ']')} {m['text']}")
+        tags = type_labels([m["memory_type"] for m in memories])
+        for tag, m in zip(tags, memories):
+            print(f"  {magenta(tag)} {m['text']}")
     else:
         print(dim("\n  nothing distilled yet — run `memoos distill`"))
 
