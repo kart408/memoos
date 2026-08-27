@@ -1157,6 +1157,45 @@ def test_out_of_scope_questions_return_nothing() -> None:
     ok("and does not call them 'more' when none were shown",
        "more" not in total)
 
+    # --- `--limit` counts what is shown, not what is fetched ---
+    #
+    # Fetching exactly the limit and then gating meant the bar ate slots
+    # that results further down were ready to fill: a store with plenty
+    # to say answered `--limit 8` with 7, or 2. The fetch widens so the
+    # page can be filled; the pool is the ceiling because past it there
+    # is nothing left to ask for.
+    check("the window widens to leave room for the bar",
+          memoos_cli.search_window(8, 60), 32)
+    check("but never past the candidate pool",
+          memoos_cli.search_window(40, 60), 60)
+    check("and never below what was asked for",
+          memoos_cli.search_window(80, 60), 80)
+
+    def hit(name, similarity):
+        return MemoryQueryResult(
+            memory=Memory(container="page", text=name),
+            score=0.016, vector_score=similarity, matched_by=["vector"])
+
+    # Ranked best-first; the bar takes the 2nd and 3rd. A page of 3 has
+    # to come back full, from further down, rather than one short.
+    ranked = [hit("a", 0.90), hit("b", 0.20), hit("c", 0.20),
+              hit("d", 0.80), hit("e", 0.70), hit("f", 0.60)]
+    survivors = [r for r in ranked if r.vector_score > 0.48]
+    page, suppressed = memoos_cli.gated_page(ranked, survivors, 3)
+    check("the page is filled from further down", len(page), 3)
+    check("with the best survivors, in order",
+          [r.memory.text for r in page], ["a", "d", "e"])
+
+    # The count is over the page asked for, not over everything fetched
+    # to fill it: two of the top three were removed, and the three weak
+    # ones deeper in the pool are not the user's business.
+    check("suppressed counts this page, not the whole fetch", suppressed, 2)
+
+    check("nothing suppressed when the bar took nothing",
+          memoos_cli.gated_page(ranked, ranked, 3)[1], 0)
+    check("and an empty store pages to nothing",
+          memoos_cli.gated_page([], [], 3), ([], 0))
+
 
 @reports
 def test_api_validates_every_container_name() -> None:
