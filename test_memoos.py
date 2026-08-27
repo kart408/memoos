@@ -1137,6 +1137,26 @@ def test_out_of_scope_questions_return_nothing() -> None:
     ok("with no suppression note when nothing was suppressed",
        "below the confidence bar" not in on_topic)
 
+    # The note itself, all three branches. The partial case — some shown,
+    # some below the bar — is the one you meet most often and the one a
+    # live container cannot be relied on to produce, since which side of
+    # the bar a result falls on depends on real cosines. It stayed
+    # untested while the message was inline in `cmd_recall`.
+    check("nothing suppressed says nothing",
+          memoos_cli.suppression_note(0, any_shown=True), "")
+    check("and stays quiet with no results either",
+          memoos_cli.suppression_note(0, any_shown=False), "")
+
+    partial = memoos_cli.suppression_note(1, any_shown=True)
+    ok("some shown, some below the bar, reads as a footnote",
+       "1 more below the confidence bar" in partial and "`--all`" in partial)
+
+    total = memoos_cli.suppression_note(2, any_shown=False)
+    ok("nothing shown says how to get at what was dropped",
+       "2 below the confidence bar" in total and "to see them" in total)
+    ok("and does not call them 'more' when none were shown",
+       "more" not in total)
+
 
 @reports
 def test_api_validates_every_container_name() -> None:
