@@ -432,6 +432,49 @@ def test_global_container_reaches_every_command() -> None:
     # line up, so the label is padded rather than truncated.
     from memoos_core.models import MemoryType
 
+    # --- the handover has to publish the number that means similarity ---
+    #
+    # `--json` exposed `score` alone, which is RRF: it encodes rank and
+    # tops out near 1/(RRF_K + 1), about 0.016. An agent thresholding on
+    # it makes the category error `in_scope` documents, and one reading
+    # 0.0153 as near-zero confidence throws away a good memory. The
+    # cosine is the number the bars are calibrated against, so it ships
+    # alongside.
+    import io
+    import json as jsonlib
+    from contextlib import redirect_stdout
+
+    from memoos_core import MemoOS
+
+    ctx = MemoOS(container="ctxjson")
+    ctx.add("The project uses PostgreSQL for storage.")
+    ctx.add("The project runs its tests with pytest.")
+    ctx.close()
+
+    ctx_args = memoos_cli.build_parser().parse_args(
+        ["--container", "ctxjson", "context", "--json", "what database is used"])
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        memoos_cli.cmd_context(ctx_args)
+    payload = jsonlib.loads(buffer.getvalue())
+
+    ok("the block is still valid json", bool(payload["memories"]))
+    for entry in payload["memories"]:
+        ok("every result carries a vector_score", "vector_score" in entry)
+        # Null is a real answer: a hit that arrived on a literal token or
+        # a shared entity has no vector opinion, and inventing one would
+        # misrepresent the half of hybrid search that exists for rare
+        # names and IDs.
+        similarity = entry["vector_score"]
+        ok("which is a cosine or an honest null",
+           similarity is None or 0.0 <= similarity <= 1.0)
+
+    scored = [e for e in payload["memories"] if e["vector_score"] is not None]
+    ok("and it is not the rank score wearing a different name",
+       all(abs(e["score"] - e["vector_score"]) > 0.1 for e in scored))
+    ok("the rank score still tops out where RRF does",
+       all(e["score"] < 0.1 for e in payload["memories"]))
+
     labels = memoos_cli.type_labels([t.value for t in MemoryType])
     for memory_type, label in zip(MemoryType, labels):
         ok(f"{memory_type.value} is spelled out", memory_type.value in label)
