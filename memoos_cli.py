@@ -179,17 +179,39 @@ def cmd_recall(args) -> int:
     journal = Journal()
 
     if args.query:
+        from memoos_core.retrieval import in_scope
         from memoos_core.terminal import TerminalMemory
+        query = " ".join(args.query)
         memory = TerminalMemory(container=container)
-        hits = memory.memo.search(" ".join(args.query), top_k=args.limit, touch=False)
+        hits = memory.memo.search(query, top_k=args.limit, touch=False)
+
+        # `search` returns its nearest neighbours however distant — that
+        # is what nearest-neighbour means, and it is the right contract
+        # for a caller that can act on the scores. A person reading three
+        # lines in a terminal is not that caller: asked something this
+        # container knows nothing about, it answered with its three
+        # least-bad guesses and a number beside each one. The bars that
+        # turn that into "I don't know about that" already existed and
+        # were calibrated; only `context` was using them.
+        shown = hits if args.all else in_scope(hits, query=query)
+        suppressed = len(hits) - len(shown)
+
         rule(f"{container} · recall")
-        if not hits:
+        if not shown:
             print(dim("  nothing relevant remembered yet"))
+            # Never silently: a suppressed result is information, and
+            # this is the CLI you reach for when you are asking why the
+            # store said what it said.
+            if suppressed:
+                print(dim(f"  {suppressed} below the confidence bar — "
+                          f"`--all` to see them"))
             return 0
-        for hit in hits:
+        for hit in shown:
             why = ",".join(hit.matched_by)
             sim = f"{hit.vector_score:.2f}" if hit.vector_score is not None else " -- "
             print(f"  {cyan(sim)} {hit.memory.text}  {dim('(' + why + ')')}")
+        if suppressed:
+            print(dim(f"  {suppressed} more below the confidence bar — `--all`"))
         return 0
 
     counts = quick.counts(container)
@@ -883,6 +905,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = subs.add_parser("recall", help="what this project remembers")
     p.add_argument("query", nargs="*", help="optional question (uses semantic search)")
     p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--all", action="store_true",
+                   help="include results the store is not confident about")
     p.set_defaults(func=cmd_recall)
 
     p = subs.add_parser("context", help="what an agent should know before this task")

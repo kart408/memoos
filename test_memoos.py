@@ -1089,6 +1089,54 @@ def test_out_of_scope_questions_return_nothing() -> None:
     ok("search itself is unchanged", bool(ungated["results"]))
     memo.close()
 
+    # --- and `recall` has to use the bars too ---
+    #
+    # They were calibrated and then wired into `context` alone, so
+    # `memoos recall "why did the auth tests fail"` still answered a
+    # question the store knew nothing about with its three least-bad
+    # guesses. The contract above is unchanged — `search()` still returns
+    # its neighbours and the scores are still printed — but a person
+    # reading three lines in a terminal is not a caller who can act on a
+    # cosine, and the state that means "I don't know about that" has to
+    # reach them.
+    import io
+    from contextlib import redirect_stdout
+
+    import memoos_cli
+
+    cli = MemoOS(container="gatecli")
+    cli.add("The project uses PostgreSQL for storage.")
+    cli.close()
+
+    def recall(*argv):
+        args = memoos_cli.build_parser().parse_args(
+            ["--container", "gatecli", "recall", *argv])
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            memoos_cli.cmd_recall(args)
+        return buffer.getvalue()
+
+    off_topic = recall("who won the world cup in 1998")
+    ok("an out-of-scope question answers with nothing",
+       "nothing relevant remembered yet" in off_topic)
+    ok("and never with the memory it was not about",
+       "PostgreSQL" not in off_topic)
+
+    # Suppressed is not the same as absent. This is the command you reach
+    # for when you are asking why the store said what it said, so what
+    # the bar removed stays reachable.
+    ok("but it says something was suppressed",
+       "below the confidence bar" in off_topic)
+    ok("--all brings it back",
+       "PostgreSQL" in recall("--all", "who won the world cup in 1998"))
+
+    # The gate must not swallow a question the store genuinely answers.
+    on_topic = recall("what database does the project use")
+    ok("a question it does know is still answered",
+       "PostgreSQL" in on_topic)
+    ok("with no suppression note when nothing was suppressed",
+       "below the confidence bar" not in on_topic)
+
 
 @reports
 def test_api_validates_every_container_name() -> None:
