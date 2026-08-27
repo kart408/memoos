@@ -881,6 +881,28 @@ def test_a_request_is_not_a_memory() -> None:
                  "Editing api.py made the authentication tests pass."):
         ok(f"still dropped, knowingly: {text[:34]}", not names_known_subject(text))
 
+    # The word being present is not the sentence being about it. Searched
+    # across the whole text, `\buser\b` passed "A user guide was written"
+    # — a fact about documentation — through a guard whose only job is
+    # deciding what the sentence is about.
+    for text in ("A user guide was written.",
+                 "Documentation for the user was updated.",
+                 "Zomato hired a new user researcher."):
+        ok(f"the word is not the subject: {text[:34]}",
+           not names_known_subject(text))
+
+    # Every form the prompt mandates still passes, article and possessive
+    # included: the anchor moved, the vocabulary did not.
+    for text in ("User moved to Delhi.",
+                 "User is doing an internship at Zomato.",
+                 "The user ran `./start_demo.sh`.",
+                 "User's application is deployed on Vercel.",
+                 "The user's manager is Anjali.",
+                 "The project uses JWT for authentication.",
+                 "The project's tests run with pytest."):
+        ok(f"a mandated subject form is kept: {text[:34]}",
+           names_known_subject(text))
+
     # --- an empty extraction has to say which kind of empty it is ---
     from memoos_core import extraction
 
