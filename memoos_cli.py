@@ -348,23 +348,32 @@ def cmd_context(args) -> int:
             "query": result["query"],
             "plan": result["plan"],
             "context": result["context"],
-            # Two numbers, because they are not the same kind of thing.
+            # Four numbers, and they are not the same kind of thing.
+            #
             # `score` is RRF: it encodes *rank*, and tops out near
             # 1/(RRF_K + 1) — about 0.016 — so an agent thresholding on
             # it is making a category error that fails silently, and one
             # reading 0.0153 as near-zero confidence is discarding a good
             # memory. `vector_score` is raw cosine, the number the
-            # confidence bars are actually calibrated against and the
-            # only one of the two that means "how close is this".
+            # confidence bars are calibrated against and the only one
+            # that means "how close is this". `keyword_score` is
+            # normalised BM25, and `strength` the decay/reinforcement
+            # multiplier. Together the three answer "why did this
+            # surface?", which is what `MemoryQueryResult` keeps them
+            # for and what makes the store debuggable rather than a
+            # black box — and all three are on the model already, so
+            # both API routes have been serving them all along.
             #
-            # Null when the hit arrived on a literal token or a shared
-            # entity rather than on distance — there is no vector opinion
-            # to report, and inventing one would misrepresent the half of
-            # hybrid search that exists for rare names and IDs.
+            # Any of them may be null, and null is an answer: a hit that
+            # arrived on distance has no BM25 opinion, and one that
+            # arrived on a literal token has no cosine. A zero would
+            # read as "measured, and far", which is a different claim
+            # and a false one.
             "memories": [
                 {"id": h.memory.id, "text": h.memory.text,
                  "type": h.memory.memory_type.value,
                  "score": h.score, "vector_score": h.vector_score,
+                 "keyword_score": h.keyword_score, "strength": h.strength,
                  "matched_by": h.matched_by,
                  "current": h.memory.is_current(),
                  "importance": h.memory.importance,

@@ -445,6 +445,7 @@ def test_global_container_reaches_every_command() -> None:
     from contextlib import redirect_stdout
 
     from memoos_core import MemoOS
+    from memoos_core.models import Memory, MemoryQueryResult
 
     ctx = MemoOS(container="ctxjson")
     ctx.add("The project uses PostgreSQL for storage.")
@@ -460,20 +461,34 @@ def test_global_container_reaches_every_command() -> None:
 
     ok("the block is still valid json", bool(payload["memories"]))
     for entry in payload["memories"]:
-        ok("every result carries a vector_score", "vector_score" in entry)
-        # Null is a real answer: a hit that arrived on a literal token or
-        # a shared entity has no vector opinion, and inventing one would
-        # misrepresent the half of hybrid search that exists for rare
-        # names and IDs.
-        similarity = entry["vector_score"]
-        ok("which is a cosine or an honest null",
-           similarity is None or 0.0 <= similarity <= 1.0)
+        for field in ("vector_score", "keyword_score", "strength"):
+            ok(f"every result carries {field}", field in entry)
+            # Null is a real answer, and the key stays present to say so.
+            # A hit that arrived on distance has no BM25 opinion and one
+            # that arrived on a literal token has no cosine; a zero would
+            # read as "measured, and far", which is a different claim and
+            # a false one.
+            value = entry[field]
+            ok(f"{field} is a number or an honest null",
+               value is None or isinstance(value, float))
 
     scored = [e for e in payload["memories"] if e["vector_score"] is not None]
-    ok("and it is not the rank score wearing a different name",
+    ok("the cosine is not the rank score wearing a different name",
        all(abs(e["score"] - e["vector_score"]) > 0.1 for e in scored))
     ok("the rank score still tops out where RRF does",
        all(e["score"] < 0.1 for e in payload["memories"]))
+
+    # None of them may be coerced on the way out. Serialising a missing
+    # number as 0.0 would be indistinguishable from a measured zero.
+    absent = MemoryQueryResult(
+        memory=Memory(container="ctxjson", text="The API key is AKIA7Q."),
+        score=0.0163, matched_by=["keyword"])
+    encoded = jsonlib.dumps({"vector_score": absent.vector_score,
+                             "keyword_score": absent.keyword_score,
+                             "strength": absent.strength})
+    check("an unmeasured number serialises as null, never as zero",
+          encoded, '{"vector_score": null, "keyword_score": null, '
+                   '"strength": null}')
 
     labels = memoos_cli.type_labels([t.value for t in MemoryType])
     for memory_type, label in zip(MemoryType, labels):
