@@ -167,6 +167,29 @@ def rejection_note(result: Dict) -> str:
             dim(f" — {reasons}"))
 
 
+def suppression_note(suppressed: int, *, any_shown: bool) -> str:
+    """
+    What the confidence bar removed, or "" if it removed nothing.
+
+    Suppressed is not the same as absent. `recall` is the command you
+    reach for when you are asking why the store said what it said, so
+    the count the bar took stays on screen and `--all` brings the
+    results themselves back — hiding them silently would trade one
+    quiet failure for another.
+
+    Dim in both cases, unlike `rejection_note`'s warning, because these
+    are different events wearing the same shape. Every candidate being
+    rejected means the prompt and its own validator disagree and
+    somebody has to look; everything falling below the bar is the
+    *correct* answer to a question this container knows nothing about.
+    """
+    if not suppressed:
+        return ""
+    if any_shown:
+        return dim(f"  {suppressed} more below the confidence bar — `--all`")
+    return dim(f"  {suppressed} below the confidence bar — `--all` to see them")
+
+
 def cmd_recall(args) -> int:
     """
     What this project remembers.
@@ -199,19 +222,17 @@ def cmd_recall(args) -> int:
         rule(f"{container} · recall")
         if not shown:
             print(dim("  nothing relevant remembered yet"))
-            # Never silently: a suppressed result is information, and
-            # this is the CLI you reach for when you are asking why the
-            # store said what it said.
-            if suppressed:
-                print(dim(f"  {suppressed} below the confidence bar — "
-                          f"`--all` to see them"))
+            note = suppression_note(suppressed, any_shown=False)
+            if note:
+                print(note)
             return 0
         for hit in shown:
             why = ",".join(hit.matched_by)
             sim = f"{hit.vector_score:.2f}" if hit.vector_score is not None else " -- "
             print(f"  {cyan(sim)} {hit.memory.text}  {dim('(' + why + ')')}")
-        if suppressed:
-            print(dim(f"  {suppressed} more below the confidence bar — `--all`"))
+        note = suppression_note(suppressed, any_shown=True)
+        if note:
+            print(note)
         return 0
 
     counts = quick.counts(container)
