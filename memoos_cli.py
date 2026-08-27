@@ -167,6 +167,36 @@ def rejection_note(result: Dict) -> str:
             dim(f" — {reasons}"))
 
 
+def search_window(limit: int, ceiling: int) -> int:
+    """
+    How many candidates to fetch to fill a page of `limit` after gating.
+
+    Fetching exactly `limit` and then removing the weak ones is what made
+    `--limit 8` return 7, or 2: the bar ate slots that results further
+    down were ready to fill. Widening the slice is close to free, because
+    `search` scores a fixed candidate pool and `top_k` only slices the
+    ranked end of it — the retrieval work is already done. `ceiling` is
+    that pool, past which there is nothing left to ask for.
+    """
+    return max(limit, min(limit * 4, ceiling))
+
+
+def gated_page(hits: Sequence, passing: Sequence, limit: int) -> tuple:
+    """
+    The page to show, and how many results the bar took off it.
+
+    The count is over the window the user asked for, not over everything
+    fetched to fill it. Saying "18 below the bar" because the tail of a
+    60-deep pool is weak tells them nothing they asked about; the useful
+    number is how many results that would have been on *this page* were
+    removed from it.
+    """
+    kept = {result.memory.id for result in passing}
+    suppressed = sum(1 for result in hits[:limit]
+                     if result.memory.id not in kept)
+    return list(passing[:limit]), suppressed
+
+
 def suppression_note(suppressed: int, *, any_shown: bool) -> str:
     """
     What the confidence bar removed, or "" if it removed nothing.
@@ -202,11 +232,26 @@ def cmd_recall(args) -> int:
     journal = Journal()
 
     if args.query:
+        from memoos_core import config
         from memoos_core.retrieval import in_scope
         from memoos_core.terminal import TerminalMemory
         query = " ".join(args.query)
         memory = TerminalMemory(container=container)
-        hits = memory.memo.search(query, top_k=args.limit, touch=False)
+
+        # `--limit` is how many results to *show*, so the bar has to run
+        # before the count is taken. Asking `search` for exactly the
+        # limit and then removing the weak ones meant a `--limit 8` that
+        # returned 7, or 2 — the bar ate slots that results further down
+        # were ready to fill.
+        #
+        # Widening the slice is close to free: `search` scores a fixed
+        # candidate pool (VECTOR_CANDIDATES + KEYWORD_CANDIDATES) and
+        # `top_k` only slices the ranked end of it, so the retrieval work
+        # is already done. The pool is the ceiling because past it there
+        # is nothing more to ask for.
+        ceiling = config.VECTOR_CANDIDATES + config.KEYWORD_CANDIDATES
+        hits = memory.memo.search(
+            query, top_k=search_window(args.limit, ceiling), touch=False)
 
         # `search` returns its nearest neighbours however distant — that
         # is what nearest-neighbour means, and it is the right contract
@@ -216,8 +261,11 @@ def cmd_recall(args) -> int:
         # least-bad guesses and a number beside each one. The bars that
         # turn that into "I don't know about that" already existed and
         # were calibrated; only `context` was using them.
-        shown = hits if args.all else in_scope(hits, query=query)
-        suppressed = len(hits) - len(shown)
+        if args.all:
+            shown, suppressed = hits[:args.limit], 0
+        else:
+            shown, suppressed = gated_page(
+                hits, in_scope(hits, query=query), args.limit)
 
         rule(f"{container} · recall")
         if not shown:
@@ -925,7 +973,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = subs.add_parser("recall", help="what this project remembers")
     p.add_argument("query", nargs="*", help="optional question (uses semantic search)")
-    p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--limit", type=int, default=8,
+                   help="how many results to show (after the confidence bar)")
     p.add_argument("--all", action="store_true",
                    help="include results the store is not confident about")
     p.set_defaults(func=cmd_recall)
