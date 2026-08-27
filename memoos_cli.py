@@ -348,10 +348,24 @@ def cmd_context(args) -> int:
             "query": result["query"],
             "plan": result["plan"],
             "context": result["context"],
+            # Two numbers, because they are not the same kind of thing.
+            # `score` is RRF: it encodes *rank*, and tops out near
+            # 1/(RRF_K + 1) — about 0.016 — so an agent thresholding on
+            # it is making a category error that fails silently, and one
+            # reading 0.0153 as near-zero confidence is discarding a good
+            # memory. `vector_score` is raw cosine, the number the
+            # confidence bars are actually calibrated against and the
+            # only one of the two that means "how close is this".
+            #
+            # Null when the hit arrived on a literal token or a shared
+            # entity rather than on distance — there is no vector opinion
+            # to report, and inventing one would misrepresent the half of
+            # hybrid search that exists for rare names and IDs.
             "memories": [
                 {"id": h.memory.id, "text": h.memory.text,
                  "type": h.memory.memory_type.value,
-                 "score": h.score, "matched_by": h.matched_by,
+                 "score": h.score, "vector_score": h.vector_score,
+                 "matched_by": h.matched_by,
                  "current": h.memory.is_current(),
                  "importance": h.memory.importance,
                  "confidence": h.memory.confidence}
