@@ -197,8 +197,18 @@ def is_pure_question(text: str) -> bool:
 
 
 # The subjects the extraction prompt mandates, in the words it mandates
-# them: "User" for the person, "The project" for the codebase.
-_KNOWN_SUBJECT = re.compile(r"\buser\b|^\s*the project\b", re.IGNORECASE)
+# them: "User" for the person, "The project" for the codebase — and in
+# the position it mandates them, which is the front of the sentence.
+#
+# Anchored, because `\buser\b` anywhere in the text is not a subject
+# test. "A user guide was written" is a fact about documentation with
+# the word in it, and it passed a guard whose whole job is deciding what
+# the sentence is *about*.
+_KNOWN_SUBJECT = re.compile(
+    r"^\s*(?:the\s+)?user(?:'s)?\b"     # User ..., The user ..., User's ...
+    r"|^\s*the\s+project(?:'s)?\b",     # The project ..., The project's ...
+    re.IGNORECASE,
+)
 
 
 def names_known_subject(text: str) -> bool:
@@ -219,6 +229,12 @@ def names_known_subject(text: str) -> bool:
     gap, kept deliberately narrow — this guard is the confabulation net
     on the `remember()` path, and widening it to any sentence about
     anything is what it exists to prevent.
+
+    Named as the *subject*, not merely present. Searching the whole
+    sentence let "A user guide was written" through: the word is there,
+    but the sentence is about a document, and a guard that cannot tell
+    those apart is not testing what it claims to. The mandated forms all
+    put the subject first, so that is where this looks.
     """
     return _KNOWN_SUBJECT.search(text) is not None
 
