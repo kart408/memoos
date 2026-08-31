@@ -92,6 +92,12 @@ Only *semantic* search loads the embedding model.
 ---
 ## Quickstart
 
+**zsh, on macOS or Linux.** The automatic half is three zsh hooks — `precmd`,
+`chpwd`, `zshexit` — and there is no bash or fish equivalent in the box. The
+CLI is plain Python and runs under any shell, so `recall`, `ingest` and
+`distill` still work by hand; what an unsupported shell costs you is the
+recording, which is the half worth having.
+
 **1. Install Ollama and pull the extraction model.**
 
 ```bash
@@ -106,12 +112,28 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**3. Attach it to your shell.**
+**3. Attach it to your shell** — with the venv from step 2 still active.
 
 ```bash
 python memoos_cli.py install
 echo 'source ~/.memoos/memoos.zsh' >> ~/.zshrc
 ```
+
+That the venv is active matters more than it looks. The hook is *generated*
+rather than copied, and it embeds the interpreter that wrote it as
+`MEMOOS_PYTHON` — so installing from outside the venv binds every future
+terminal to a Python that cannot import `requests` or `sentence-transformers`.
+
+The damage is oddly shaped, because the write path is pure stdlib. Journalling
+carries on working perfectly. What breaks is distillation, which runs
+backgrounded at `zshexit` with its output discarded — so it fails without a
+word, and the events pile up unfolded forever.
+
+`memoos doctor` will not catch this one: it imports nothing that would fail,
+so it comes back green. The tell is its last line — *events awaiting distill*
+climbing across sessions and never falling back to none. Re-run
+`memoos install` from the venv and it is fixed; nothing was lost, because
+pending events are exactly what the next distil picks up.
 
 **4. Check every part of the chain.**
 
