@@ -70,6 +70,49 @@ window first". There is a toggle in the dashboard that does the same thing.
 while disconnected, because declining to record today says nothing about what
 you learned yesterday.
 
+### The dashboard closes with the terminal
+
+`memoos start` brings up Ollama and the dashboard and opens it in your
+browser. Closing that terminal takes all of it back down — the server stops,
+the port is released, and the tab it opened is closed.
+
+That is worth stating because it used to be a hope rather than a guarantee.
+A closing terminal sends SIGHUP to its foreground process, and uvicorn
+handles SIGINT and SIGTERM and nothing else; when the signal did not arrive —
+a force-quit, a tty lost some other way — the server was orphaned onto init,
+still bound to port 8000. Days later the next `memoos start` failed with
+`address already in use` against a dashboard with no window anywhere, whose
+browser tab still answered because the thing serving it was never told to
+stop.
+
+So it is enforced now, from both ends: SIGHUP is handled so the ordinary
+close is a graceful shutdown rather than a kill that skips the teardown, and
+a watchdog reads `getppid()` so that a shell which dies without saying
+anything is noticed anyway. Whichever fires first, the same teardown runs.
+
+```console
+$ memoos start
+  ollama http://localhost:11434   model mistral:latest
+dashboard → http://127.0.0.1:8000/
+^C
+  dashboard stopped · 1 tab closed
+```
+
+Closing the tab is macOS-only and best-effort — there is no cross-platform
+way to script a browser — and the first time it runs, macOS will ask whether
+Terminal may control Chrome. Say no and nothing else changes: the server
+still stops, you are just left closing the tab yourself. Only tabs pointing
+at this dashboard's own address are touched, only in browsers already
+running, and only when this command was the one that opened the browser —
+`memoos serve --no-open` closes nothing, because a window you opened by hand
+is not one it should be closing.
+
+Recording is untouched by any of this. Closing the terminal ends *that*
+terminal's journalling, because the shell it was hooked into is gone; other
+open terminals carry on, and the next one you open is connected. Stopping
+everywhere is still `memoos disconnect`, which is a switch you throw rather
+than something a window closing decides for you.
+
 ### Two speeds, on purpose
 
 The split between journalling and distilling is the whole design.
@@ -187,6 +230,7 @@ memoos connect        start recording
 memoos disconnect     stop recording (reading still works)
 memoos status         connected or not, and what is stored
 memoos serve          the dashboard, with the graph drawn
+memoos start          ollama + the dashboard, from any directory
 ```
 
 ---
@@ -435,7 +479,8 @@ memoos_core/
 ├── consolidation.py duplicates, contradictions, supersession, decay
 ├── graph.py         the entity graph
 ├── hook.py          the zsh hook, generated and bound at install time
-└── connection.py    the recording switch — stdlib, read on every command
+├── connection.py    the recording switch — stdlib, read on every command
+└── dashboard.py     the dashboard's lifetime: it ends with its terminal
 ```
 
 A few decisions worth knowing about:
@@ -544,13 +589,13 @@ live number.
 python test_memoos.py
 ```
 
-220 assertions against a scratch data directory — it never touches your real
+322 assertions against a scratch data directory — it never touches your real
 store. No Ollama and no extraction model are needed, and that is enforced
 rather than assumed: one of the tests points the client at a dead port and
 checks the write path still completes.
 
 ```
-  220 passed, 0 failed
+  322 passed, 0 failed
 ```
 
 It also runs under `pytest`, and now actually fails there. The assertions
@@ -569,8 +614,9 @@ that deleting a memory takes its vector with it, that a question is expanded
 with concepts the project actually knows and not with somebody's sister, that
 supersession closes a memory's validity window in the same statement that
 retires it, that a store written before those columns existed upgrades in place
-without losing a row, and that a memory can be traced back to the passage and
-the session it came from.
+without losing a row, that a memory can be traced back to the passage and the
+session it came from, and that the dashboard stops when its terminal does — including
+when the shell is killed outright and no signal ever reaches it.
 
 `memoos doctor` is the complement: it checks the running system — hook, store,
 Ollama, model — rather than the code.

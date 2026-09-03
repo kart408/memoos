@@ -17,6 +17,7 @@ What it covers, roughly in the order a command flows through the system:
   vectors     ranking, exclusion, deletion, and the cross-process cache
   cascade     deleting a memory takes its vector with it
   one file    everything about a container is in that container's file
+  dashboard   the server stops when the terminal that started it does
 
 No test framework, so there is nothing to install: the assertions are
 plain, and a failure prints what it expected against what it got.
@@ -1401,6 +1402,150 @@ def test_looking_around_is_not_work() -> None:
         ok(f"still a node: {name}", not _is_junk_entity(name))
 
 
+# ------------------------------------------------------------- dashboard
+
+@reports
+def test_dashboard_dies_with_its_terminal() -> None:
+    """
+    The whole point of the parent watchdog.
+
+    A dashboard that outlives its terminal is invisible and still bound
+    to the port, so the next `memoos start` fails against a server the
+    user has no window for. SIGKILLing the parent here reproduces the
+    case a signal handler cannot: the shell goes without ever getting to
+    hang anything up, and the only notice is the reparenting.
+
+    The child exits 7 from inside the stop callback, which is also the
+    assertion that the callback ran — rather than that something else
+    happened to kill it.
+    """
+    section("dashboard")
+    import subprocess
+    import time
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    child = (f"import os, sys, time; sys.path.insert(0, {root!r}); "
+             "from memoos_core import dashboard; "
+             "dashboard.stop_when_terminal_closes(lambda: os._exit(7), 0.1); "
+             "time.sleep(30)")
+
+    # An intermediate shell, so there is a parent to kill that is not the
+    # test runner. It also makes the child a background job, which is
+    # exactly where a SIGINT-based stop would be silently ignored.
+    holder = subprocess.Popen(
+        ["/bin/sh", "-c", f'{sys.executable} -c "$0" & echo $!; sleep 30', child],
+        stdout=subprocess.PIPE, text=True)
+    watched = int(holder.stdout.readline().strip())
+
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    time.sleep(0.5)
+    ok("a live parent is left alone", alive(watched))
+
+    holder.kill()
+    holder.wait(timeout=5)
+
+    for _ in range(100):
+        if not alive(watched):
+            break
+        time.sleep(0.1)
+    orphaned = alive(watched)
+    if orphaned:
+        os.kill(watched, 9)
+    ok("the server stops when the shell goes", not orphaned)
+
+
+@reports
+def test_hangup_is_a_shutdown_not_a_kill() -> None:
+    """
+    A closing terminal has to reach the teardown, not skip it.
+
+    SIGHUP's default action ends the process where it stands, which is
+    why an orphaned dashboard used to leave its browser tab behind. With
+    the handler installed the exit code below is the child's own — proof
+    that the stop callback ran — rather than a signalled death, which
+    would report as -1.
+    """
+    import signal as _signal
+    import subprocess
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    child = (f"import os, sys, time; sys.path.insert(0, {root!r}); "
+             "from memoos_core import dashboard; "
+             "dashboard.stop_when_terminal_closes(lambda: os._exit(7)); "
+             "print('ready', flush=True); time.sleep(30)")
+
+    process = subprocess.Popen([sys.executable, "-c", child],
+                               stdout=subprocess.PIPE, text=True)
+    process.stdout.readline()          # wait until the handler is installed
+    process.send_signal(_signal.SIGHUP)
+    try:
+        code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        code = None
+    check("hangup runs the teardown instead of killing", code, 7)
+
+
+@reports
+def test_only_this_dashboard_is_closed() -> None:
+    """
+    Which tabs the shutdown is allowed to touch.
+
+    A loopback bind answers to three spellings and the browser records
+    whichever one was typed, so all three have to match — but a
+    different port is a different server, and closing someone's other
+    localhost tab because it shares a hostname would be unforgivable.
+    """
+    from memoos_core import dashboard
+
+    matched = dashboard.origins("127.0.0.1", 8000)
+    ok("localhost is the same dashboard", "http://localhost:8000" in matched)
+    ok("0.0.0.0 is the same dashboard", "http://0.0.0.0:8000" in matched)
+    ok("another port is not", "http://127.0.0.1:8001" not in matched)
+
+    # A bind to a real interface is one address, with no aliasing.
+    external = dashboard.origins("192.168.1.10", 8000)
+    check("a routable host gets no aliases", external, ["http://192.168.1.10:8000"])
+
+    # The origin is interpolated into AppleScript, so a hostile hostname
+    # must not be able to close the quote and run something else.
+    quoted = dashboard._applescript_string('a"b\\c')
+    check("applescript strings are escaped", quoted, '"a\\"b\\\\c"')
+
+
+@reports
+def test_port_conflict_is_seen_before_binding() -> None:
+    """
+    The preflight that turns a bind traceback into a fix.
+
+    Reported the way uvicorn would find it, SO_REUSEADDR included, so a
+    socket in TIME_WAIT is not mistaken for a server still sitting there.
+    """
+    import socket as _socket
+
+    from memoos_core import dashboard
+
+    with _socket.socket() as holder:
+        holder.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        taken = holder.getsockname()[1]
+        ok("a bound port is reported taken", dashboard.port_in_use("127.0.0.1", taken))
+        found = dashboard.listening_pid(taken)
+        # lsof may be absent or restricted; only the answer it gives has
+        # to be right.
+        ok("the holder is named, if it can be", found in (None, os.getpid()))
+
+    ok("a free port is not", not dashboard.port_in_use("127.0.0.1", taken))
+
+
+
 def main() -> int:
     print(f"scratch store: {SCRATCH}")
     for test in (test_paths, test_journal_isolation,
@@ -1421,7 +1566,11 @@ def main() -> int:
                  test_past_signals_are_surfaced_not_acted_on,
                  test_out_of_scope_questions_return_nothing,
                  test_api_validates_every_container_name,
-                 test_relation_only_entities_are_linked):
+                 test_relation_only_entities_are_linked,
+                 test_dashboard_dies_with_its_terminal,
+                 test_hangup_is_a_shutdown_not_a_kill,
+                 test_only_this_dashboard_is_closed,
+                 test_port_conflict_is_seen_before_binding):
         try:
             test()
         except AssertionError:
