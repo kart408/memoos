@@ -17,7 +17,8 @@ back when you open a new terminal in the same project.
     memoos ingest FILE    teach it about you or the project
     memoos graph          what it knows, and how it connects
     memoos clear          forget a project, or every project
-    memoos serve          the dashboard
+    memoos serve          the dashboard, in the foreground
+    memoos stop           stop the dashboard
 
 Every command is scoped to a *container*, which is the git repo you are
 standing in. Projects never see each other's memory.
@@ -916,7 +917,137 @@ def cmd_start(args) -> int:
 
     print(f"  {green('ollama')} {dim(config.OLLAMA_URL)}   "
           f"{green('model')} {dim(config.EXTRACT_MODEL)}")
-    return cmd_serve(args)
+    return _start_dashboard(args)
+
+
+DASHBOARD_LOG = os.path.expanduser("~/.memoos/dashboard.log")
+
+
+def _start_dashboard(args) -> int:
+    """
+    Put the dashboard in the background and give the prompt back.
+
+    It used to run in the foreground, which meant `memoos start` ate the
+    terminal it was started from. That is the wrong trade twice over:
+    the dashboard is a thing you glance at, not a thing you sit in front
+    of, and the terminal it took hostage is the one whose commands it
+    exists to be a view of. Typing `memoos distill` after starting it
+    did nothing at all, because there was nowhere left to type.
+
+    Detaching costs the parent link the shutdown watchdog reads, so the
+    shell's pid is handed over explicitly — see `--owner-pid`. The
+    dashboard still belongs to this terminal and still goes when it
+    does; it just no longer stands in front of it.
+    """
+    import subprocess
+    import time
+
+    from memoos_core import dashboard
+
+    url = f"http://{args.host}:{args.port}/"
+
+    # Starting a second one is the most likely thing to be doing by
+    # accident, and it is not an error — it is the answer to the
+    # question that was being asked.
+    if _dashboard_answering(args.host, args.port):
+        print(f"  {green('already running')} {dim('→ ' + url)}"
+              + dim(f"   (pid {dashboard.listening_pid(args.port) or '?'})"))
+        # Still worth a window if there is not one — the server being up
+        # and the page being visible are different things, and this
+        # command is the one that promises both.
+        if not args.no_open:
+            show(args, url)
+        return 0
+
+    if dashboard.port_in_use(args.host, args.port):
+        owner = dashboard.listening_pid(args.port)
+        print("\n  " + red(f"port {args.port} is already in use")
+              + dim(" by something that is not the dashboard"))
+        if owner:
+            print(dim(f"  pid {owner} — stop it with `kill {owner}`, or use --port"))
+        print()
+        return 1
+
+    os.makedirs(os.path.dirname(DASHBOARD_LOG), exist_ok=True)
+    command = [sys.executable, os.path.abspath(__file__), "serve",
+               "--host", args.host, "--port", str(args.port),
+               # The shell, read before we detach from it. Afterwards
+               # there is nothing to read: our parent becomes init.
+               "--owner-pid", str(os.getppid())]
+    if args.no_open:
+        command.append("--no-open")
+
+    with open(DASHBOARD_LOG, "ab") as log:
+        # Its own session, so that the prompt returning does not take it
+        # with us, and so a Ctrl-C aimed at the next command in this
+        # terminal does not land on the dashboard instead.
+        server = subprocess.Popen(command, stdout=log, stderr=log,
+                                  stdin=subprocess.DEVNULL,
+                                  start_new_session=True)
+
+    for _ in range(60):
+        if _dashboard_answering(args.host, args.port):
+            break
+        if server.poll() is not None:
+            print("\n  " + red("the dashboard stopped while starting")
+                  + dim(f" — see {DASHBOARD_LOG}\n"))
+            return 1
+        time.sleep(0.5)
+    else:
+        print("\n  " + red("the dashboard did not come up")
+              + dim(f" — see {DASHBOARD_LOG}\n"))
+        return 1
+
+    print(f"  {green('dashboard')} {dim(url)}   {dim(f'pid {server.pid}')}")
+    print(dim("  stops when this terminal closes, or on `memoos stop`"))
+    return 0
+
+
+def _dashboard_answering(host: str, port: int) -> bool:
+    """Is *our* dashboard on that port, as opposed to anything at all?"""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as response:
+            return json.load(response).get("status") == "ok"
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def cmd_stop(args) -> int:
+    """
+    Stop the dashboard without closing the terminal.
+
+    Backgrounding it took Ctrl-C away as the way to stop it, so this is
+    the replacement. SIGTERM rather than SIGKILL, because the teardown
+    is the point: the tab closes with the server.
+    """
+    import signal
+    import time
+
+    from memoos_core import dashboard
+
+    if not _dashboard_answering(args.host, args.port):
+        print(dim(f"  no dashboard on port {args.port}"))
+        return 0
+
+    pid = dashboard.listening_pid(args.port)
+    if pid is None:
+        print(yellow("  a dashboard is answering but its pid is not visible")
+              + dim(" — close the terminal that started it"))
+        return 1
+
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(60):
+        if not dashboard.pid_alive(pid):
+            break
+        time.sleep(0.25)
+    else:
+        print(yellow(f"  pid {pid} is still running") + dim(" — `kill -9` it"))
+        return 1
+
+    print(yellow("stopped") + dim(f" — dashboard pid {pid}"))
+    return 0
 
 
 def _has_model(wanted: str) -> bool:
@@ -930,6 +1061,32 @@ def _has_model(wanted: str) -> bool:
     # `mistral` should match `mistral:latest`, and the other way round.
     stem = wanted.split(":")[0]
     return any(name == wanted or name.split(":")[0] == stem for name in names)
+
+
+def show(args, url: str) -> None:
+    """
+    Put the dashboard in front of someone, once.
+
+    Opening it unconditionally is what made starting it twice a
+    nuisance: the second run threw an identical tab at you and pulled
+    you out of the terminal to do it, and the second tab tells you
+    nothing the first did not. So the page is opened only when it is not
+    already open somewhere, which makes `memoos start` mean "the
+    dashboard is up and there is a window showing it" however many times
+    it is run.
+
+    Best-effort, and deliberately biased: when the answer cannot be
+    known — automation refused, no browser we recognise, not macOS — it
+    opens. A duplicate tab is a smaller failure than a dashboard nobody
+    can see.
+    """
+    from memoos_core import dashboard
+    try:
+        if dashboard.count_tabs(args.host, args.port):
+            return
+    except Exception:
+        pass
+    webbrowser.open(url)
 
 
 # How long the dashboard waits for open connections before it stops
@@ -989,18 +1146,9 @@ def cmd_serve(args) -> int:
     url = f"http://{args.host}:{args.port}/"
     print(dim(f"dashboard → {url}"))
 
-    # Whether a browser was ever pointed at this, which is what decides
-    # if there is a tab of ours to close later. A `--no-open` run, or one
-    # that stopped inside the first second and a half, opened nothing.
-    opened = threading.Event()
-
-    def open_browser() -> None:
-        opened.set()
-        webbrowser.open(url)
-
     # Deferred until the server is actually up, otherwise the browser
     # races uvicorn's bind and lands on a connection error.
-    opener = None if args.no_open else threading.Timer(1.5, open_browser)
+    opener = None if args.no_open else threading.Timer(1.5, lambda: show(args, url))
     if opener is not None:
         opener.start()
 
@@ -1023,19 +1171,23 @@ def cmd_serve(args) -> int:
         timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS))
 
     # A page whose server has gone is a page that will not reload, so
-    # the tab goes when the server does. Only a tab this command opened:
-    # `--no-open` pointed no browser anywhere, and a window somebody
-    # opened by hand is not ours to close.
+    # the tab goes when the server does — whoever opened it. That used
+    # to be limited to tabs this command opened itself, on the grounds
+    # that a window somebody opened by hand is not ours to close. Now
+    # that nothing is opened automatically, that rule left the only tab
+    # there ever is out of the cleanup, which is the wrong half to keep.
+    # Address and port still bound it: this dashboard's own page, and
+    # nothing else.
     #
-    # Once, whichever way the server stops. It has two ways out — the
-    # terminal closing, which comes through the callback below, and a
-    # Ctrl-C, which uvicorn catches itself and never tells us about — so
-    # both paths ask, and the first one to arrive does the work.
+    # Once, whichever way the server stops. It has several ways out —
+    # the terminal closing, which comes through the callback below, and
+    # a Ctrl-C, which uvicorn catches itself and never tells us about —
+    # so every path asks, and the first to arrive does the work.
     done = threading.Event()
     closed: List[int] = []
 
     def close_the_tab() -> None:
-        if done.is_set() or not opened.is_set():
+        if done.is_set():
             return
         done.set()
         try:
@@ -1054,7 +1206,8 @@ def cmd_serve(args) -> int:
         # them, so the wait above is ended rather than sat out.
         close_the_tab()
 
-    dashboard.stop_when_terminal_closes(stop_server)
+    dashboard.stop_when_terminal_closes(
+        stop_server, owner_pid=getattr(args, "owner_pid", None))
 
     try:
         server.run()
@@ -1186,13 +1339,25 @@ def build_parser() -> argparse.ArgumentParser:
     p = subs.add_parser("start", help="start ollama and the dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.add_argument("--no-open", action="store_true",
+                   help="do not open a browser, even if nothing is showing it")
     p.set_defaults(func=cmd_start)
 
-    p = subs.add_parser("serve", help="run the dashboard")
+    p = subs.add_parser("stop", help="stop the dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--no-open", action="store_true", help="do not open a browser")
+    p.set_defaults(func=cmd_stop)
+
+    p = subs.add_parser("serve", help="run the dashboard in the foreground")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--no-open", action="store_true",
+                   help="do not open a browser, even if nothing is showing it")
+    # Set by `memoos start` when it detaches the dashboard, naming the
+    # shell whose life the dashboard should share. Not for typing: after
+    # detaching there is no parent left to infer it from.
+    p.add_argument("--owner-pid", type=int, default=None,
+                   help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_serve)
 
     return parser

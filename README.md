@@ -72,9 +72,32 @@ you learned yesterday.
 
 ### The dashboard closes with the terminal
 
-`memoos start` brings up Ollama and the dashboard and opens it in your
-browser. Closing that terminal takes all of it back down — the server stops,
-the port is released, and the tab it opened is closed.
+`memoos start` brings up Ollama and the dashboard, and gives you the prompt
+back.
+
+```console
+$ memoos start
+  ollama http://localhost:11434   model mistral:latest
+  dashboard http://127.0.0.1:8766/   pid 72613
+  stops when this terminal closes, or on `memoos stop`
+$ memoos distill
+```
+
+It does not sit in the foreground. The dashboard is a thing you glance at,
+and the terminal it used to take hostage is the one whose commands it exists
+to be a view of — `memoos distill` typed underneath it did nothing at all,
+because there was nowhere left to type.
+
+It also opens the page only if nothing is already showing it. It used to open
+one every time, so a second `memoos start` threw an identical tab at you and
+pulled you out of the terminal to do it, when the tab it wanted was already
+sitting there. Running it twice now means what it sounds like: the dashboard
+is up, and there is one window showing it. `--no-open` if you would rather
+click the address yourself.
+
+Closing the terminal takes all of it back down: the server stops, the port is
+released, and any tab pointing at that dashboard is closed. `memoos stop`
+does the same thing without closing the window.
 
 That is worth stating because it used to be a hope rather than a guarantee.
 A closing terminal sends SIGHUP to its foreground process, and uvicorn
@@ -85,27 +108,24 @@ still bound to port 8000. Days later the next `memoos start` failed with
 browser tab still answered because the thing serving it was never told to
 stop.
 
-So it is enforced now, from both ends: SIGHUP is handled so the ordinary
-close is a graceful shutdown rather than a kill that skips the teardown, and
-a watchdog reads `getppid()` so that a shell which dies without saying
-anything is noticed anyway. Whichever fires first, the same teardown runs.
-
-```console
-$ memoos start
-  ollama http://localhost:11434   model mistral:latest
-dashboard → http://127.0.0.1:8000/
-^C
-  dashboard stopped · 1 tab closed
-```
+So it is enforced now, three ways over. SIGHUP is handled, so the ordinary
+close is a graceful shutdown rather than a kill that skips the teardown.
+SIGTERM is handled for a subtler reason: uvicorn catches it itself, shuts
+down cleanly, restores whatever handler was there before — and then re-raises
+the signal so the exit status says what stopped it. With nothing of ours to
+restore, that re-raise was the default action, and the process died inside
+uvicorn's own shutdown with the teardown still ahead of it, every log line up
+to that point claiming the shutdown had gone perfectly. And a watchdog
+watches the shell, so a terminal that dies without saying anything is noticed
+anyway — by the reparenting, or, for a dashboard detached into the background
+where there is no parent left to read, by the pid it was started from no
+longer existing.
 
 Closing the tab is macOS-only and best-effort — there is no cross-platform
 way to script a browser — and the first time it runs, macOS will ask whether
 Terminal may control Chrome. Say no and nothing else changes: the server
-still stops, you are just left closing the tab yourself. Only tabs pointing
-at this dashboard's own address are touched, only in browsers already
-running, and only when this command was the one that opened the browser —
-`memoos serve --no-open` closes nothing, because a window you opened by hand
-is not one it should be closing.
+still stops, you are just left closing the tab yourself. Only tabs at this
+dashboard's own address are touched, and only in browsers already running.
 
 Recording is untouched by any of this. Closing the terminal ends *that*
 terminal's journalling, because the shell it was hooked into is gone; other
@@ -229,8 +249,9 @@ memoos doctor         check every part of the chain
 memoos connect        start recording
 memoos disconnect     stop recording (reading still works)
 memoos status         connected or not, and what is stored
-memoos serve          the dashboard, with the graph drawn
-memoos start          ollama + the dashboard, from any directory
+memoos serve          the dashboard, in the foreground
+memoos start          ollama + the dashboard, in the background
+memoos stop           stop the dashboard
 ```
 
 ---
@@ -589,13 +610,13 @@ live number.
 python test_memoos.py
 ```
 
-322 assertions against a scratch data directory — it never touches your real
+331 assertions against a scratch data directory — it never touches your real
 store. No Ollama and no extraction model are needed, and that is enforced
 rather than assumed: one of the tests points the client at a dead port and
 checks the write path still completes.
 
 ```
-  322 passed, 0 failed
+  331 passed, 0 failed
 ```
 
 It also runs under `pytest`, and now actually fails there. The assertions
@@ -615,8 +636,9 @@ with concepts the project actually knows and not with somebody's sister, that
 supersession closes a memory's validity window in the same statement that
 retires it, that a store written before those columns existed upgrades in place
 without losing a row, that a memory can be traced back to the passage and the
-session it came from, and that the dashboard stops when its terminal does — including
-when the shell is killed outright and no signal ever reaches it.
+session it came from, and that the dashboard stops when its terminal does —
+on a hangup, on a `kill`, and when the shell is killed outright so that no
+signal ever reaches it at all.
 
 `memoos doctor` is the complement: it checks the running system — hook, store,
 Ollama, model — rather than the code.

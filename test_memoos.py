@@ -1480,16 +1480,116 @@ def test_hangup_is_a_shutdown_not_a_kill() -> None:
              "dashboard.stop_when_terminal_closes(lambda: os._exit(7)); "
              "print('ready', flush=True); time.sleep(30)")
 
-    process = subprocess.Popen([sys.executable, "-c", child],
-                               stdout=subprocess.PIPE, text=True)
-    process.stdout.readline()          # wait until the handler is installed
-    process.send_signal(_signal.SIGHUP)
+    for name in ("SIGHUP", "SIGTERM"):
+        process = subprocess.Popen([sys.executable, "-c", child],
+                                   stdout=subprocess.PIPE, text=True)
+        process.stdout.readline()      # wait until the handlers are installed
+        process.send_signal(getattr(_signal, name))
+        try:
+            code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            code = None
+        check(f"{name} runs the teardown instead of killing", code, 7)
+
+
+@reports
+def test_every_way_of_stopping_reaches_the_teardown() -> None:
+    """
+    The same test, against the command rather than the module.
+
+    Worth its seconds because the bug it is here for lived in the
+    *interaction*, where a unit test could not see it. uvicorn catches
+    SIGINT and SIGTERM itself, and once it has shut down gracefully it
+    restores the handler that was there before it started and re-raises
+    the signal, so the exit status reports what stopped it. SIGHUP it
+    never touches; SIGINT lands on Python's default and becomes a
+    KeyboardInterrupt that unwinds normally. SIGTERM was the one with
+    nothing of ours to restore, so the re-raise was the default action
+    and the process died inside uvicorn's own shutdown, teardown and
+    browser tab still ahead of it — while every log line up to that
+    point said the shutdown had gone perfectly.
+
+    `--no-open` keeps a browser out of it. What is being checked is that
+    the teardown is reached at all, which is what the last line says.
+    """
+    import signal as _signal
+    import socket as _socket
+    import subprocess
+    import time
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    with _socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    def serving() -> bool:
+        with _socket.socket() as client:
+            client.settimeout(0.5)
+            return client.connect_ex(("127.0.0.1", port)) == 0
+
+    for name in ("SIGHUP", "SIGTERM", "SIGINT"):
+        process = subprocess.Popen(
+            [sys.executable, "memoos_cli.py", "serve",
+             "--port", str(port), "--no-open"],
+            cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True)
+        for _ in range(200):
+            if serving():
+                break
+            time.sleep(0.1)
+        else:
+            process.kill()
+            ok(f"{name}: server came up", False)
+            continue
+
+        process.send_signal(getattr(_signal, name))
+        try:
+            output = process.communicate(timeout=30)[0]
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output = ""
+        ok(f"{name} reaches the teardown", "dashboard stopped" in output)
+        ok(f"{name} releases the port", not serving())
+
+
+@reports
+def test_a_detached_dashboard_still_belongs_to_its_shell() -> None:
+    """
+    `memoos start` puts the dashboard in its own session so the prompt
+    can come back, and that throws away the parent link the watchdog
+    reads: getppid() is init from the first moment and never changes
+    again. The shell is named explicitly instead, and watched by whether
+    it is still there — which is the same question, asked of a pid we
+    were told rather than one we can look up.
+    """
+    import subprocess
+    import time
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    # A stand-in for the shell: something with a pid, that we can end.
+    shell = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    child = (f"import os, sys, time; sys.path.insert(0, {root!r}); "
+             "from memoos_core import dashboard; "
+             f"dashboard.stop_when_terminal_closes(lambda: os._exit(7), 0.1, {shell.pid}); "
+             "print('ready', flush=True); time.sleep(30)")
+    detached = subprocess.Popen([sys.executable, "-c", child],
+                                stdout=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    detached.stdout.readline()
+
+    time.sleep(0.5)
+    ok("a live shell keeps it running", detached.poll() is None)
+
+    shell.kill()
+    shell.wait(timeout=5)
     try:
-        code = process.wait(timeout=10)
+        code = detached.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        process.kill()
+        detached.kill()
         code = None
-    check("hangup runs the teardown instead of killing", code, 7)
+    check("the named shell going takes it with it", code, 7)
 
 
 @reports
@@ -1569,6 +1669,8 @@ def main() -> int:
                  test_relation_only_entities_are_linked,
                  test_dashboard_dies_with_its_terminal,
                  test_hangup_is_a_shutdown_not_a_kill,
+                 test_every_way_of_stopping_reaches_the_teardown,
+                 test_a_detached_dashboard_still_belongs_to_its_shell,
                  test_only_this_dashboard_is_closed,
                  test_port_conflict_is_seen_before_binding):
         try:
