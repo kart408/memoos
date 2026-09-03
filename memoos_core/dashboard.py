@@ -13,9 +13,9 @@ see, whose browser tab still answers, from a session that ended days ago.
 
 So the lifetime is enforced rather than assumed, from two directions:
 
-  signals   SIGHUP is handled, which turns the ordinary close from a
-            default kill that skips teardown into a graceful shutdown
-            that gets to run it.
+  signals   SIGHUP and SIGTERM are handled, which turns a close or a
+            `kill` from a default action that skips the teardown into a
+            graceful shutdown that gets to run it.
 
   parent    A watchdog thread reads getppid(). When the shell that
             started us dies the kernel reparents us, and that change is
@@ -65,15 +65,18 @@ BROWSERS = (
     "Safari",
 )
 
-# Iterating tabs downward matters: closing tab 3 renumbers everything
-# after it, so a forward loop skips the tab that slid into the gap. The
-# inner `try`s are for windows that have no tabs — a Safari downloads
-# window, a Chrome app window — which would otherwise abort the sweep
-# for every window behind them.
-_CLOSE_TABS = '''
+# One sweep over every tab, with the thing done to a match left as a
+# hole: closing it, or nothing at all when we are only counting.
+#
+# Iterating downward matters for the closing case: closing tab 3
+# renumbers everything after it, so a forward loop skips the tab that
+# slid into the gap. The inner `try`s are for windows that have no tabs
+# — a Safari downloads window, a Chrome app window — which would
+# otherwise abort the sweep for every window behind them.
+_TAB_SWEEP = '''
 on run
   set targets to __TARGETS__
-  set closedCount to 0
+  set matched to 0
   try
     if application __APP__ is running then
       tell application __APP__
@@ -85,8 +88,8 @@ on run
                 set u to ((URL of tab i of w) as text)
                 repeat with t in targets
                   if u is t or u starts with (t & "/") then
-                    close tab i of w
-                    set closedCount to closedCount + 1
+                    __ACTION__
+                    set matched to matched + 1
                     exit repeat
                   end if
                 end repeat
@@ -98,7 +101,7 @@ on run
       end tell
     end if
   end try
-  return closedCount as text
+  return matched as text
 end run
 '''
 
@@ -143,26 +146,27 @@ def _running_apps() -> set:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def close_tabs(host: str, port: int) -> int:
+def _sweep_tabs(host: str, port: int, action: str) -> int:
     """
-    Close the browser tabs showing this dashboard. Returns how many.
+    Visit every tab showing this dashboard, and report how many.
 
-    Never raises, and never launches a browser to do it: a browser that
-    is not running has no tab to close, and starting one in order to
-    find that out would be the rudest possible way to end a session.
+    Never raises, and never launches a browser to look: a browser that
+    is not running has no tab in it, and starting one in order to find
+    that out would be the rudest possible way to answer the question.
     """
     if sys.platform != "darwin":
         return 0
 
     targets = "{" + ", ".join(_applescript_string(o) for o in origins(host, port)) + "}"
     running = _running_apps()
-    closed = 0
+    matched = 0
 
     for app in BROWSERS:
         if app not in running:
             continue
-        script = (_CLOSE_TABS
+        script = (_TAB_SWEEP
                   .replace("__TARGETS__", targets)
+                  .replace("__ACTION__", action)
                   .replace("__APP__", _applescript_string(app)))
         try:
             result = subprocess.run(["osascript", "-e", script],
@@ -170,19 +174,52 @@ def close_tabs(host: str, port: int) -> int:
         except (OSError, subprocess.SubprocessError):
             continue
         # A refused automation prompt, a browser mid-crash, a dictionary
-        # that turned out not to match: all of them mean "no tab closed
-        # here", none of them mean the shutdown went wrong.
+        # that turned out not to match: all of them mean "nothing found
+        # here", none of them mean anything went wrong.
         if result.returncode != 0:
             continue
         try:
-            closed += int(result.stdout.strip() or 0)
+            matched += int(result.stdout.strip() or 0)
         except ValueError:
             continue
 
-    return closed
+    return matched
 
 
-def stop_when_terminal_closes(stop, interval: float = 1.0) -> None:
+def close_tabs(host: str, port: int) -> int:
+    """Close the browser tabs showing this dashboard. Returns how many."""
+    return _sweep_tabs(host, port, "close tab i of w")
+
+
+def count_tabs(host: str, port: int) -> int:
+    """
+    How many tabs are already showing this dashboard.
+
+    Asked before opening one, so that starting the dashboard twice does
+    not leave you with the same page twice. Zero is the safe answer when
+    it cannot be known — no browser we recognise, automation refused,
+    not macOS — because opening a tab that turns out to be a duplicate
+    is a smaller failure than never opening one at all.
+    """
+    return _sweep_tabs(host, port, "")
+
+
+def pid_alive(pid: int) -> bool:
+    """Is that process still there?"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Someone else's process, which means it exists.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def stop_when_terminal_closes(stop, interval: float = 1.0,
+                              owner_pid: Optional[int] = None) -> None:
     """
     Call `stop` once the terminal that started this process is gone.
 
@@ -195,15 +232,28 @@ def stop_when_terminal_closes(stop, interval: float = 1.0) -> None:
     callback that flips uvicorn's own `should_exit` is checked by its
     main loop every tick and cannot be ignored by anybody.
 
-    Two triggers, because either one alone has a hole in it:
+    Three triggers, because none of them covers the others:
 
       SIGHUP    the ordinary close. Handled only so that the default
                 action — die here, now, skipping the teardown — does not
                 get to run. This is the fast path when it arrives.
 
-      getppid   the backstop. When SIGHUP never comes, the reparenting
-                still does; nothing can suppress it, and polling for it
-                costs one syscall a second.
+      SIGTERM   `kill`, which is what the busy-port message tells people
+                to run. Handled for a subtler reason: uvicorn catches
+                SIGTERM itself, shuts down gracefully, restores whatever
+                handler was there before it started, and then re-raises
+                the signal so the exit status says what killed it. With
+                nothing of ours there to restore, that re-raise is the
+                default action, and the process dies inside uvicorn's
+                own shutdown with the teardown still ahead of it. A
+                handler of ours is what the re-raise lands on instead.
+
+      the shell  the backstop. When no signal comes at all, the shell
+                being gone still says so — either because we were
+                reparented off it, or, for a dashboard detached into the
+                background, because the pid it was started from no
+                longer exists. Nothing can suppress that, and polling
+                for it costs one syscall a second.
     """
     stopped = threading.Event()
 
@@ -212,25 +262,38 @@ def stop_when_terminal_closes(stop, interval: float = 1.0) -> None:
             stopped.set()
             stop()
 
-    def hangup(signum, frame):   # noqa: ARG001 - signal handler signature
+    def handle(signum, frame):   # noqa: ARG001 - signal handler signature
         once()
 
-    try:
-        signal.signal(signal.SIGHUP, hangup)
-    except (AttributeError, OSError, ValueError):
-        # No SIGHUP here, or not the main thread. The watchdog below
-        # covers the same ground, a second later.
-        pass
+    for name in ("SIGHUP", "SIGTERM"):
+        try:
+            signal.signal(getattr(signal, name), handle)
+        except (AttributeError, OSError, ValueError):
+            # Not a signal this platform has, or not the main thread.
+            # The watchdog below covers the same ground, a second later.
+            pass
 
-    original = os.getppid()
-    if original <= 1:
-        # Already owned by init, so there is no terminal to outlive and
-        # no ppid change that will ever come. Watching would be a thread
-        # that never fires.
-        return
+    # `owner_pid` is for a dashboard that was started into the
+    # background: it has been detached into its own session so that the
+    # prompt can come back, which means its parent is init from the
+    # first moment and getppid() will never change again. The shell that
+    # asked for it is named explicitly instead, and watched by whether
+    # it still exists.
+    if owner_pid is not None:
+        if owner_pid <= 1:
+            return
+        gone = lambda: not pid_alive(owner_pid)          # noqa: E731
+    else:
+        original = os.getppid()
+        if original <= 1:
+            # Already owned by init, so there is no terminal to outlive
+            # and no ppid change that will ever come. Watching would be
+            # a thread that never fires.
+            return
+        gone = lambda: os.getppid() != original          # noqa: E731
 
     def watch() -> None:
-        while os.getppid() == original and not stopped.is_set():
+        while not gone() and not stopped.is_set():
             time.sleep(interval)
         once()
 
