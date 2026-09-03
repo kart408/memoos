@@ -932,6 +932,11 @@ def _has_model(wanted: str) -> bool:
     return any(name == wanted or name.split(":")[0] == stem for name in names)
 
 
+# How long the dashboard waits for open connections before it stops
+# anyway. See cmd_serve for why an unbounded wait is the bug.
+SHUTDOWN_GRACE_SECONDS = 3
+
+
 def cmd_serve(args) -> int:
     """
     Run the dashboard, from wherever you happen to be standing.
@@ -941,8 +946,16 @@ def cmd_serve(args) -> int:
     *import*, which only succeeds from the project root. Without the path
     insert below, `memoos serve` worked in ~/memoos and nowhere else,
     which is the opposite of what a globally-available command should do.
+
+    The dashboard belongs to the terminal that started it. Closing that
+    window stops the server and closes the tab it opened, and it does so
+    whether or not the shell managed to signal us on the way out — see
+    `memoos_core.dashboard` for why that has to be enforced rather than
+    assumed.
     """
     import uvicorn
+
+    from memoos_core import dashboard
 
     root = os.path.dirname(os.path.abspath(__file__))
     if root not in sys.path:
@@ -957,14 +970,107 @@ def cmd_serve(args) -> int:
               dim(f" at {_ollama_url()} — the dashboard will read fine, "
                   "but distilling needs it"))
 
+    # Fail with the fix rather than with uvicorn's bind traceback. The
+    # usual cause is a dashboard that outlived its terminal — the thing
+    # this command now prevents — but one started before the fix, or
+    # killed outright, can still be sitting on the port with no window
+    # left anywhere that would explain it.
+    if dashboard.port_in_use(args.host, args.port):
+        owner = dashboard.listening_pid(args.port)
+        print("\n  " + red(f"port {args.port} is already in use"))
+        if owner:
+            print(dim(f"  something is already listening there (pid {owner}) — "
+                      f"stop it with `kill {owner}`, or use --port"))
+        else:
+            print(dim("  use --port to serve somewhere else"))
+        print()
+        return 1
+
     url = f"http://{args.host}:{args.port}/"
     print(dim(f"dashboard → {url}"))
-    if not args.no_open:
-        # Deferred until the server is actually up, otherwise the browser
-        # races uvicorn's bind and lands on a connection error.
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
 
-    uvicorn.run("api:app", host=args.host, port=args.port, reload=False)
+    # Whether a browser was ever pointed at this, which is what decides
+    # if there is a tab of ours to close later. A `--no-open` run, or one
+    # that stopped inside the first second and a half, opened nothing.
+    opened = threading.Event()
+
+    def open_browser() -> None:
+        opened.set()
+        webbrowser.open(url)
+
+    # Deferred until the server is actually up, otherwise the browser
+    # races uvicorn's bind and lands on a connection error.
+    opener = None if args.no_open else threading.Timer(1.5, open_browser)
+    if opener is not None:
+        opener.start()
+
+    # Built by hand rather than through `uvicorn.run`, because the
+    # teardown needs something to hold: `should_exit` is polled by
+    # uvicorn's own main loop every tick, which makes stopping the
+    # server a flag any thread can set instead of a signal that has to
+    # find the right one.
+    #
+    # The graceful-shutdown timeout is the difference between "stops"
+    # and "stops soon". A browser keeps a dozen sockets open on a page
+    # like this, and uvicorn waits for every one of them before it will
+    # exit — which is a wait with no upper bound, held open by the very
+    # tab we are about to close, in a terminal that no longer exists to
+    # press Ctrl-C a second time. Local requests take milliseconds, so
+    # a few seconds is generous for the work and short enough that
+    # closing the window feels like closing the window.
+    server = uvicorn.Server(uvicorn.Config(
+        "api:app", host=args.host, port=args.port, reload=False,
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS))
+
+    # A page whose server has gone is a page that will not reload, so
+    # the tab goes when the server does. Only a tab this command opened:
+    # `--no-open` pointed no browser anywhere, and a window somebody
+    # opened by hand is not ours to close.
+    #
+    # Once, whichever way the server stops. It has two ways out — the
+    # terminal closing, which comes through the callback below, and a
+    # Ctrl-C, which uvicorn catches itself and never tells us about — so
+    # both paths ask, and the first one to arrive does the work.
+    done = threading.Event()
+    closed: List[int] = []
+
+    def close_the_tab() -> None:
+        if done.is_set() or not opened.is_set():
+            return
+        done.set()
+        try:
+            closed.append(dashboard.close_tabs(args.host, args.port))
+        except Exception:
+            # The server stopping was the part that mattered, and it has
+            # already happened. A browser that will not be scripted must
+            # not turn a clean shutdown into a traceback.
+            pass
+
+    def stop_server() -> None:
+        server.should_exit = True
+        # Closing the tab here, rather than waiting until the server has
+        # stopped, is also what lets it stop quickly: the page is holding
+        # a dozen keep-alive sockets and uvicorn waits on every one of
+        # them, so the wait above is ended rather than sat out.
+        close_the_tab()
+
+    dashboard.stop_when_terminal_closes(stop_server)
+
+    try:
+        server.run()
+    finally:
+        if opener is not None:
+            # A server stopped before the timer fires would otherwise
+            # open its own dashboard on the way out.
+            opener.cancel()
+        close_the_tab()
+        # Nothing to report if it never got as far as serving — a failed
+        # import or a busy port has already said what went wrong, and
+        # "dashboard stopped" on top of it would only be confusing.
+        if server.started:
+            count = closed[0] if closed else 0
+            tabs = f" · {count} tab{'s' if count != 1 else ''} closed" if count else ""
+            print("\n" + dim(f"  dashboard stopped{tabs}"))
     return 0
 
 
